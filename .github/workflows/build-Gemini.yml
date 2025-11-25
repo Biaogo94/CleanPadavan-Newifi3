@@ -44,7 +44,7 @@ jobs:
         CURRENT_DATE=$(date +%Y%m%d)
         echo "DATE=$CURRENT_DATE" >> $GITHUB_ENV
         
-        # 逻辑判断：设置 URL 并提取干净的版本号
+        # 逻辑判断：设置 URL
         if [[ "${{ inputs.target_version }}" == *"3.4"* ]]; then
           REPO_URL="https://github.com/hanwckf/rt-n56u.git"
           REPO_BRANCH="master"
@@ -57,10 +57,6 @@ jobs:
           echo "BUILD_VER=4.4" >> $GITHUB_ENV
         fi
         
-        # --- 修改点：适配 Newifi3 D2 ---
-        TARGET_DEVICE="NEWIFI3"
-        # ----------------------------
-        
         # =======================================================
         # 2. 拉取源码
         # =======================================================
@@ -68,25 +64,31 @@ jobs:
         git clone --depth=1 --branch $REPO_BRANCH $REPO_URL $WORK_DIR
         
         # =======================================================
-        # 3. 【关键修复】针对 3.4 版本的工具链补丁 (修正版)
+        # 3. 【兼容性修复合集】针对 3.4 版本 + Ubuntu 22.04
         # =======================================================
         if [[ "${{ inputs.target_version }}" == *"3.4"* ]]; then
-            echo "Applying patch for xz-5.2.4 build on Ubuntu 22.04..."
+            echo "Running compatibility fixes for 3.4..."
             
-            # 定位 xz 源码目录
+            # --- 修复 1: xz 工具链 (解决 po 报错) ---
+            echo "Patching xz..."
             XZ_SRC_DIR="$WORK_DIR/trunk/tools/mksquashfs_xz/xz-5.2.4"
-            
-            # 核心修复：直接修改 Makefile.in。
-            # 这里的原理是：configure 脚本会根据 Makefile.in 生成 Makefile。
-            # 我们在 configure 运行前，把 SUBDIRS 里的 " po " 替换为空格。
-            # 这样生成的 Makefile 里就根本不会有 po 目录，编译时直接跳过语言包构建。
             if [ -f "$XZ_SRC_DIR/Makefile.in" ]; then
                 sed -i 's/ po / /g' "$XZ_SRC_DIR/Makefile.in"
-                echo "Success: Patched Makefile.in to skip 'po' directory."
+            elif [ -f "$XZ_SRC_DIR/Makefile" ]; then
+                sed -i 's/ po / /g' "$XZ_SRC_DIR/Makefile"
+            fi
+            
+            # --- 修复 2: e2fsprogs (解决 AM_GNU_GETTEXT 报错) ---
+            echo "Patching e2fsprogs (autoreconf)..."
+            # 这是一个关键修复：强制刷新配置脚本以适配新系统
+            if [ -d "$WORK_DIR/trunk/user/e2fsprogs" ]; then
+                cd $WORK_DIR/trunk/user/e2fsprogs
+                # 删除旧的 macro 缓存，强制重新生成
+                rm -f aclocal.m4
+                autoreconf -i -v -f
+                cd $WORK_DIR
             else
-                echo "Warning: Makefile.in not found, using fallback patch..."
-                # 备用方案：如果目录结构有变，尝试直接修改可能已经存在的 Makefile
-                [ -f "$XZ_SRC_DIR/Makefile" ] && sed -i 's/ po / /g' "$XZ_SRC_DIR/Makefile"
+                echo "Warning: e2fsprogs directory not found!"
             fi
         fi
 
@@ -98,18 +100,31 @@ jobs:
         sh dl_toolchain.sh
         
         # =======================================================
-        # 5. 配置文件修改
+        # 5. 【配置识别】自动识别 Newifi3 的配置文件名
         # =======================================================
         cd $WORK_DIR/trunk
-        TEMPLATE_PATH="configs/templates/$TARGET_DEVICE.config"
         
-        if [ ! -f "$TEMPLATE_PATH" ]; then
-          echo "Error: Template config ($TEMPLATE_PATH) not found!"
-          exit 1
+        if [ -f "configs/templates/NEWIFI3.config" ]; then
+            TARGET_DEVICE="NEWIFI3"
+        elif [ -f "configs/templates/newifi3.config" ]; then
+            TARGET_DEVICE="newifi3"
+        elif [ -f "configs/templates/NEWIFI-D2.config" ]; then
+            TARGET_DEVICE="NEWIFI-D2"
+        else
+            echo "Error: Could not find any Newifi3 config file!"
+            ls -lh configs/templates/
+            exit 1
         fi
         
-        echo "Applying customization..."
-        # --- 净化插件 (去除 Newifi3 默认可能开启的 USB 应用以保持轻量) ---
+        echo "Detected Target Device Config: $TARGET_DEVICE"
+        TEMPLATE_PATH="configs/templates/$TARGET_DEVICE.config"
+        
+        # =======================================================
+        # 6. 配置文件修改 (净化插件 & 优化)
+        # =======================================================
+        echo "Applying customization to $TEMPLATE_PATH..."
+        
+        # 移除不需要的插件
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_ARIA=y/CONFIG_FIRMWARE_INCLUDE_ARIA=n/g' $TEMPLATE_PATH
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION=y/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION=n/g' $TEMPLATE_PATH
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_WGET=y/CONFIG_FIRMWARE_INCLUDE_WGET=n/g' $TEMPLATE_PATH
@@ -121,25 +136,18 @@ jobs:
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_V2RAY=y/CONFIG_FIRMWARE_INCLUDE_V2RAY=n/g' $TEMPLATE_PATH
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_TROJAN=y/CONFIG_FIRMWARE_INCLUDE_TROJAN=n/g' $TEMPLATE_PATH
         
-        # --- 性能优化 ---
+        # 开启 Flow Offload
         sed -i 's/CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=n/CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=y/g' $TEMPLATE_PATH
         if ! grep -q "CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD" $TEMPLATE_PATH; then
             echo "CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=y" >> $TEMPLATE_PATH
         fi
         
         # =======================================================
-        # 6. 生成 .config
+        # 7. 生成 .config 并 编译
         # =======================================================
         cp -f $TEMPLATE_PATH .config
-        if [ ! -f .config ]; then
-          echo "FATAL ERROR: .config file was not created!"
-          exit 1
-        fi
         
-        # =======================================================
-        # 7. 执行编译
-        # =======================================================
-        echo "Starting Build..."
+        echo "Starting Build for $TARGET_DEVICE..."
         fakeroot ./build_firmware $TARGET_DEVICE
         
     - name: Organize Artifacts
