@@ -74,7 +74,7 @@ jobs:
             echo "Applying strict fixes for 3.4..."
             
             # --- Fix 1: xz (Tools) ---
-            # 禁用 NLS，跳过 po 目录
+            # 禁用 NLS，跳过 po 目录，解决 mv: cannot stat 't-fr.gmo'
             MKSQ_MAKEFILE="$WORK_DIR/trunk/tools/mksquashfs_xz/Makefile"
             if [ -f "$MKSQ_MAKEFILE" ]; then
                 sed -i 's/.\/configure/.\/configure --disable-nls/g' "$MKSQ_MAKEFILE"
@@ -93,18 +93,24 @@ jobs:
                 touch "$E2FS_CFG"
             fi
 
-            # --- Fix 3: dropbear (User) --- [绝杀修正]
+            # --- Fix 3: dropbear (User) --- [关键修正]
             DROPBEAR_MK="$WORK_DIR/trunk/user/dropbear/Makefile"
             if [ -f "$DROPBEAR_MK" ]; then
                 echo "Patching dropbear Makefile..."
-                
-                # 步骤A: 删除 autoreconf -v; 防止它重新生成配置脚本导致兼容性问题
-                # 这一步非常关键！阻止 Ubuntu 22.04 的新工具破坏老源码逻辑
+                # 1. 移除 autoreconf 防止新版本工具破坏配置
                 sed -i 's/autoreconf -v;//g' "$DROPBEAR_MK"
                 
-                # 步骤B: 注入环境变量，特别是 LIBS="-lz -lcrypt"
-                # 这强制编译器在检测时链接 zlib 和 crypt 库
-                sed -i "s|./configure|CC=\$(CC) CFLAGS=\"\$(CFLAGS)\" LDFLAGS=\"\$(LDFLAGS)\" LIBS=\"-lz -lcrypt\" ./configure|g" "$DROPBEAR_MK"
+                # 2. 移除旧的未加引号的参数，防止冲突
+                # 使用转义 \$ 来匹配 literal $
+                sed -i 's/CC=\$(CC)//g' "$DROPBEAR_MK"
+                sed -i 's/CFLAGS=\$(CFLAGS)//g' "$DROPBEAR_MK"
+                sed -i 's/LDFLAGS=\$(LDFLAGS)//g' "$DROPBEAR_MK"
+                
+                # 3. 注入带引号的环境变量和 LIBS
+                # 使用单引号 '...' 确保内部的双引号 "..." 被原样写入 Makefile
+                # 这样 CC="$(CC)" 会被 Shell 正确识别，不会报 -mips32r2 not found
+                # LIBS="-lz -lcrypt" 解决 zlib missing
+                sed -i 's|./configure|CC="$(CC)" CFLAGS="$(CFLAGS)" LDFLAGS="$(LDFLAGS)" LIBS="-lz -lcrypt" ./configure|g' "$DROPBEAR_MK"
             fi
         fi
 
@@ -114,6 +120,7 @@ jobs:
         cd "$WORK_DIR/trunk/configs/templates"
         
         echo "Injecting FULL Standard Config for $TARGET_PROFILE..."
+        # 使用 echo 逐行写入，避免 EOF 解析错误
         echo "CONFIG_VENDOR=ralink" > "$TARGET_PROFILE.config"
         echo "CONFIG_PRODUCT=MT7621" >> "$TARGET_PROFILE.config"
         echo "CONFIG_LINUXDIR=$KERNEL_DIR_NAME" >> "$TARGET_PROFILE.config"
@@ -139,10 +146,12 @@ jobs:
         cd "$TOOLCHAIN_DIR"
         sh dl_toolchain.sh
         
+        # 建立软链接，欺骗老源码的硬编码路径
         echo "Setting up symlink for toolchain..."
         sudo mkdir -p /opt/rt-n56u
         sudo ln -sf "$TOOLCHAIN_DIR/toolchain-3.4.x" /opt/rt-n56u/toolchain-mipsel
         
+        # 强制导出 PATH
         export PATH="/opt/rt-n56u/toolchain-mipsel/bin:$PATH"
         
         if ! command -v mipsel-linux-uclibc-gcc &> /dev/null; then
@@ -151,7 +160,7 @@ jobs:
         fi
 
         # =======================================================
-        # 6. 修改配置
+        # 6. 修改配置 (插件净化)
         # =======================================================
         cd "$WORK_DIR/trunk"
         echo "Customizing $TEMPLATE_PATH..."
@@ -159,6 +168,7 @@ jobs:
         sed -i '/CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD/d' "$TEMPLATE_PATH"
         echo "CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=y" >> "$TEMPLATE_PATH"
         
+        # 先删除，防止重复
         sed -i '/CONFIG_FIRMWARE_INCLUDE_ARIA/d' "$TEMPLATE_PATH"
         sed -i '/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION/d' "$TEMPLATE_PATH"
         sed -i '/CONFIG_FIRMWARE_INCLUDE_WGET/d' "$TEMPLATE_PATH"
@@ -169,6 +179,7 @@ jobs:
         sed -i '/CONFIG_FIRMWARE_INCLUDE_XRAY/d' "$TEMPLATE_PATH"
         sed -i '/CONFIG_FIRMWARE_INCLUDE_SOFTETHERVPN/d' "$TEMPLATE_PATH"
 
+        # 再写入
         echo "CONFIG_FIRMWARE_INCLUDE_ARIA=n" >> "$TEMPLATE_PATH"
         echo "CONFIG_FIRMWARE_INCLUDE_TRANSMISSION=n" >> "$TEMPLATE_PATH"
         echo "CONFIG_FIRMWARE_INCLUDE_WGET=n" >> "$TEMPLATE_PATH"
@@ -186,14 +197,17 @@ jobs:
         cp -f "$TEMPLATE_PATH" .config
         
         echo "Starting Pre-build (Libs)..."
+        # 强制语言环境
         export LC_ALL=C
         
+        # 清理残余
         make clean
         
-        # 必须先编译基础库！
+        # 【关键步骤】先编译基础库，确保 zlib/openssl 就位
         fakeroot make libs
         
         echo "Starting Full Build..."
+        # 编译完整固件
         fakeroot ./build_firmware "$TARGET_PROFILE"
         
     - name: Organize Artifacts
@@ -213,7 +227,7 @@ jobs:
           - 机型: Newifi3 D2 (NEWIFI3)
           - 版本: Padavan ${{ env.BUILD_VER }}
           - 编译日期: ${{ env.DATE }}
-          - 插件: 纯净版 (移除 Aria2/Transmission 等重型应用)
+          - 插件: 纯净版
           - 硬件加速: 开启 (Flow Offload)
         files: ${{ env.FIRMWARE_PATH }}/*.trx
       env:
