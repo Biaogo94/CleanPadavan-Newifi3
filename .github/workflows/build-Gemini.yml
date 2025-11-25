@@ -69,35 +69,40 @@ jobs:
         git clone --depth=1 --branch $REPO_BRANCH $REPO_URL $WORK_DIR
         
         # =======================================================
-        # 3. 【精准爆破】针对 3.4 版本的核心修复
+        # 3. 【全能修复包】针对 3.4 版本的核心修复
         # =======================================================
         if [[ "${{ inputs.target_version }}" == *"3.4"* ]]; then
             echo "Applying strict fixes for 3.4..."
             
             # --- Fix 1: xz (Tools) ---
-            # 策略A：在 Makefile 中注入 --disable-nls 参数
-            # 找到调用 configure 的那一行，强行追加参数，从源头关闭语言包编译
+            # 禁用 NLS，跳过 po 目录
             MKSQ_MAKEFILE="$WORK_DIR/trunk/tools/mksquashfs_xz/Makefile"
             if [ -f "$MKSQ_MAKEFILE" ]; then
-                echo "Patching xz configure arguments..."
                 sed -i 's/.\/configure/.\/configure --disable-nls/g' "$MKSQ_MAKEFILE"
             fi
-            
-            # 策略B：修改源码结构 (双重保险)
             XZ_SRC="$WORK_DIR/trunk/tools/mksquashfs_xz/xz-5.2.4"
             if [ -f "$XZ_SRC/Makefile.in" ]; then
-                echo "Patching xz Makefile.in to skip po..."
-                # 使用通配符匹配 SUBDIRS = ... 并在其后只保留 src
-                # 这一步是为了防止 --disable-nls 在某些极端情况下不生效
                 sed -i 's/SUBDIRS.*=.*/SUBDIRS = src/g' "$XZ_SRC/Makefile.in"
             fi
             
             # --- Fix 2: e2fsprogs (User) ---
+            # 屏蔽不支持的宏
             E2FS_CFG="$WORK_DIR/trunk/user/e2fsprogs/configure"
             if [ -f "$E2FS_CFG" ]; then
                 sed -i 's/AM_GNU_GETTEXT(external)/# AM_GNU_GETTEXT(external)/g' $E2FS_CFG
                 sed -i 's/AM_GNU_GETTEXT_VERSION/# AM_GNU_GETTEXT_VERSION/g' $E2FS_CFG
                 touch $E2FS_CFG
+            fi
+
+            # --- Fix 3: dropbear (User) --- [新增]
+            # 问题：configure 找不到 zlib
+            # 修复：在 Makefile 调用 configure 时，强制注入 CFLAGS 和 LDFLAGS
+            DROPBEAR_MK="$WORK_DIR/trunk/user/dropbear/Makefile"
+            if [ -f "$DROPBEAR_MK" ]; then
+                echo "Patching dropbear Makefile to pass flags..."
+                # 将 ./configure 替换为 ./configure CC=$(CC) CFLAGS="$(CFLAGS)" LDFLAGS="$(LDFLAGS)"
+                # 使用 | 作为分隔符避免路径斜杠冲突
+                sed -i 's|./configure|./configure CC=$(CC) CFLAGS="$(CFLAGS)" LDFLAGS="$(LDFLAGS)"|g' "$DROPBEAR_MK"
             fi
         fi
 
@@ -134,12 +139,11 @@ jobs:
         cd $TOOLCHAIN_DIR
         sh dl_toolchain.sh
         
-        # 建立软链接 (解决硬编码路径问题)
+        # 建立软链接
         echo "Setting up symlink for toolchain..."
         sudo mkdir -p /opt/rt-n56u
         sudo ln -sf "$TOOLCHAIN_DIR/toolchain-3.4.x" /opt/rt-n56u/toolchain-mipsel
         
-        # 导出 PATH (解决找不到编译器问题)
         export PATH="/opt/rt-n56u/toolchain-mipsel/bin:$PATH"
         
         if ! command -v mipsel-linux-uclibc-gcc &> /dev/null; then
@@ -156,6 +160,7 @@ jobs:
         sed -i '/CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD/d' $TEMPLATE_PATH
         echo "CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=y" >> $TEMPLATE_PATH
         
+        # 清理插件
         sed -i '/CONFIG_FIRMWARE_INCLUDE_ARIA/d' $TEMPLATE_PATH
         sed -i '/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION/d' $TEMPLATE_PATH
         sed -i '/CONFIG_FIRMWARE_INCLUDE_WGET/d' $TEMPLATE_PATH
@@ -185,17 +190,15 @@ jobs:
         cp -f $TEMPLATE_PATH .config
         
         echo "Starting Pre-build (Libs)..."
-        # 强制设置语言环境为 C，防止字符集问题导致编译错误
         export LC_ALL=C
         
-        # 清理环境
         make clean
         
-        # 先编译基础库 (Libs)，这会把 zlib 等安装好
+        # 1. 编译基础库 (Zlib等)
         fakeroot make libs
         
         echo "Starting Full Build..."
-        # 最后编译完整固件
+        # 2. 编译完整固件
         fakeroot ./build_firmware $TARGET_PROFILE
         
     - name: Organize Artifacts
