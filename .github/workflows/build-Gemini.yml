@@ -68,18 +68,26 @@ jobs:
         git clone --depth=1 --branch $REPO_BRANCH $REPO_URL $WORK_DIR
         
         # =======================================================
-        # 3. 【关键修复】针对 3.4 版本的工具链补丁
+        # 3. 【关键修复】针对 3.4 版本的工具链补丁 (修正版)
         # =======================================================
-        # 解释：Ubuntu 22.04 的 gettext 版本与 xz-5.2.4 不兼容，导致 po (翻译文件) 编译失败
-        # 修复：修改 mksquashfs_xz 的 Makefile，在配置完成后，强行移除对 po 目录的构建
         if [[ "${{ inputs.target_version }}" == *"3.4"* ]]; then
             echo "Applying patch for xz-5.2.4 build on Ubuntu 22.04..."
-            cd $WORK_DIR/trunk/tools/mksquashfs_xz
-            # 下面这行命令的意思是：在 Makefile 里的 $(MAKE) -C $(XZ_DIR) 之前，
-            # 插入一句 sed 命令，把 xz 源码目录下的 Makefile 里的 " po " 替换为空格。
-            # 这样 xz 在编译时就会忽略 po 目录，不再编译翻译文件。
-            sed -i 's/$(MAKE) -C $(XZ_DIR)/sed -i "s\/ po \/ \/g" $(XZ_DIR)\/Makefile; $(MAKE) -C $(XZ_DIR)/g' Makefile
-            cd $WORK_DIR
+            
+            # 定位 xz 源码目录
+            XZ_SRC_DIR="$WORK_DIR/trunk/tools/mksquashfs_xz/xz-5.2.4"
+            
+            # 核心修复：直接修改 Makefile.in。
+            # 这里的原理是：configure 脚本会根据 Makefile.in 生成 Makefile。
+            # 我们在 configure 运行前，把 SUBDIRS 里的 " po " 替换为空格。
+            # 这样生成的 Makefile 里就根本不会有 po 目录，编译时直接跳过语言包构建。
+            if [ -f "$XZ_SRC_DIR/Makefile.in" ]; then
+                sed -i 's/ po / /g' "$XZ_SRC_DIR/Makefile.in"
+                echo "Success: Patched Makefile.in to skip 'po' directory."
+            else
+                echo "Warning: Makefile.in not found, using fallback patch..."
+                # 备用方案：如果目录结构有变，尝试直接修改可能已经存在的 Makefile
+                [ -f "$XZ_SRC_DIR/Makefile" ] && sed -i 's/ po / /g' "$XZ_SRC_DIR/Makefile"
+            fi
         fi
 
         # =======================================================
