@@ -74,19 +74,16 @@ jobs:
             echo "Applying strict fixes for 3.4..."
             
             # --- Fix 1: xz (Tools) ---
-            # 禁用 NLS，跳过 po 目录
             MKSQ_MAKEFILE="$WORK_DIR/trunk/tools/mksquashfs_xz/Makefile"
             if [ -f "$MKSQ_MAKEFILE" ]; then
                 sed -i 's/.\/configure/.\/configure --disable-nls/g' "$MKSQ_MAKEFILE"
             fi
-            
             XZ_SRC="$WORK_DIR/trunk/tools/mksquashfs_xz/xz-5.2.4"
             if [ -f "$XZ_SRC/Makefile.in" ]; then
                 sed -i 's/SUBDIRS.*=.*/SUBDIRS = src/g' "$XZ_SRC/Makefile.in"
             fi
             
             # --- Fix 2: e2fsprogs (User) ---
-            # 屏蔽不支持的宏
             E2FS_CFG="$WORK_DIR/trunk/user/e2fsprogs/configure"
             if [ -f "$E2FS_CFG" ]; then
                 sed -i 's/AM_GNU_GETTEXT(external)/# AM_GNU_GETTEXT(external)/g' "$E2FS_CFG"
@@ -94,14 +91,14 @@ jobs:
                 touch "$E2FS_CFG"
             fi
 
-            # --- Fix 3: dropbear (User) --- [语法修正版]
-            # 这里改用双引号包裹 sed 命令，并显式转义内部字符，防止单引号嵌套出错
+            # --- Fix 3: dropbear (User) --- [绝对修正]
+            # 使用单引号包裹 sed 命令，防止 Shell 转义干扰
+            # 将变量放在 ./configure 之前作为环境变量传递，这是处理带空格变量最安全的方式
             DROPBEAR_MK="$WORK_DIR/trunk/user/dropbear/Makefile"
             if [ -f "$DROPBEAR_MK" ]; then
                 echo "Patching dropbear Makefile..."
-                # 这里的逻辑：把 ./configure 替换为带参数的版本
-                # 使用 \" 转义双引号，使用 \$ 转义变量引用
-                sed -i "s|./configure|./configure CC=\$(CC) CFLAGS=\"\$(CFLAGS)\" LDFLAGS=\"\$(LDFLAGS)\"|g" "$DROPBEAR_MK"
+                # 替换 ./configure 为 CC="..." CFLAGS="..." ./configure
+                sed -i 's|./configure|CC="$(CC)" CFLAGS="$(CFLAGS)" LDFLAGS="$(LDFLAGS)" ./configure|g' "$DROPBEAR_MK"
             fi
         fi
 
@@ -111,7 +108,6 @@ jobs:
         cd "$WORK_DIR/trunk/configs/templates"
         
         echo "Injecting FULL Standard Config for $TARGET_PROFILE..."
-        # 改用 echo 逐行写入，避免 EOF 解析错误
         echo "CONFIG_VENDOR=ralink" > "$TARGET_PROFILE.config"
         echo "CONFIG_PRODUCT=MT7621" >> "$TARGET_PROFILE.config"
         echo "CONFIG_LINUXDIR=$KERNEL_DIR_NAME" >> "$TARGET_PROFILE.config"
@@ -168,7 +164,6 @@ jobs:
         sed -i '/CONFIG_FIRMWARE_INCLUDE_XRAY/d' "$TEMPLATE_PATH"
         sed -i '/CONFIG_FIRMWARE_INCLUDE_SOFTETHERVPN/d' "$TEMPLATE_PATH"
 
-        # 使用 echo 追加配置
         echo "CONFIG_FIRMWARE_INCLUDE_ARIA=n" >> "$TEMPLATE_PATH"
         echo "CONFIG_FIRMWARE_INCLUDE_TRANSMISSION=n" >> "$TEMPLATE_PATH"
         echo "CONFIG_FIRMWARE_INCLUDE_WGET=n" >> "$TEMPLATE_PATH"
