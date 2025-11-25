@@ -39,7 +39,7 @@ jobs:
         # 1. 初始化与变量定义
         # =======================================================
         WORK_DIR="$GITHUB_WORKSPACE/padavan"
-        mkdir -p $WORK_DIR
+        mkdir -p "$WORK_DIR"
         TOOLCHAIN_DIR="$WORK_DIR/toolchain-mipsel"
         
         CURRENT_DATE=$(date +%Y%m%d)
@@ -65,10 +65,10 @@ jobs:
         # 2. 拉取源码
         # =======================================================
         echo "Cloning source code..."
-        git clone --depth=1 --branch $REPO_BRANCH $REPO_URL $WORK_DIR
+        git clone --depth=1 --branch $REPO_BRANCH $REPO_URL "$WORK_DIR"
         
         # =======================================================
-        # 3. 【精准爆破】针对 3.4 版本的核心修复
+        # 3. 【全能修复包】针对 3.4 版本的核心修复
         # =======================================================
         if [[ "${{ inputs.target_version }}" == *"3.4"* ]]; then
             echo "Applying strict fixes for 3.4..."
@@ -79,61 +79,62 @@ jobs:
             if [ -f "$MKSQ_MAKEFILE" ]; then
                 sed -i 's/.\/configure/.\/configure --disable-nls/g' "$MKSQ_MAKEFILE"
             fi
+            
             XZ_SRC="$WORK_DIR/trunk/tools/mksquashfs_xz/xz-5.2.4"
             if [ -f "$XZ_SRC/Makefile.in" ]; then
                 sed -i 's/SUBDIRS.*=.*/SUBDIRS = src/g' "$XZ_SRC/Makefile.in"
             fi
             
             # --- Fix 2: e2fsprogs (User) ---
+            # 屏蔽不支持的宏
             E2FS_CFG="$WORK_DIR/trunk/user/e2fsprogs/configure"
             if [ -f "$E2FS_CFG" ]; then
-                sed -i 's/AM_GNU_GETTEXT(external)/# AM_GNU_GETTEXT(external)/g' $E2FS_CFG
-                sed -i 's/AM_GNU_GETTEXT_VERSION/# AM_GNU_GETTEXT_VERSION/g' $E2FS_CFG
-                touch $E2FS_CFG
+                sed -i 's/AM_GNU_GETTEXT(external)/# AM_GNU_GETTEXT(external)/g' "$E2FS_CFG"
+                sed -i 's/AM_GNU_GETTEXT_VERSION/# AM_GNU_GETTEXT_VERSION/g' "$E2FS_CFG"
+                touch "$E2FS_CFG"
             fi
 
-            # --- Fix 3: dropbear (User) --- [关键修正]
-            # 问题：CC变量含有空格，导致 configure 参数解析错误
-            # 修复：给 $(CC) 加上双引号 -> CC="$(CC)"
+            # --- Fix 3: dropbear (User) --- [语法修正版]
+            # 这里改用双引号包裹 sed 命令，并显式转义内部字符，防止单引号嵌套出错
             DROPBEAR_MK="$WORK_DIR/trunk/user/dropbear/Makefile"
             if [ -f "$DROPBEAR_MK" ]; then
-                echo "Patching dropbear Makefile to pass flags correctly..."
-                # 注意这里：CC="$(CC)"
-                sed -i 's|./configure|./configure CC="$(CC)" CFLAGS="$(CFLAGS)" LDFLAGS="$(LDFLAGS)"|g' "$DROPBEAR_MK"
+                echo "Patching dropbear Makefile..."
+                # 这里的逻辑：把 ./configure 替换为带参数的版本
+                # 使用 \" 转义双引号，使用 \$ 转义变量引用
+                sed -i "s|./configure|./configure CC=\$(CC) CFLAGS=\"\$(CFLAGS)\" LDFLAGS=\"\$(LDFLAGS)\"|g" "$DROPBEAR_MK"
             fi
         fi
 
         # =======================================================
         # 4. 【注入配置】生成完整标准配置
         # =======================================================
-        cd $WORK_DIR/trunk/configs/templates
+        cd "$WORK_DIR/trunk/configs/templates"
         
         echo "Injecting FULL Standard Config for $TARGET_PROFILE..."
-        cat <<EOF > $TARGET_PROFILE.config
-        CONFIG_VENDOR=ralink
-        CONFIG_PRODUCT=MT7621
-        CONFIG_LINUXDIR=$KERNEL_DIR_NAME
-        CONFIG_FIRMWARE_PRODUCT_ID="NEWIFI3"
-        CONFIG_FIRMWARE_CPU_MT7621=y
-        CONFIG_FIRMWARE_MEMORY_512M=y
-        CONFIG_FIRMWARE_FLASH_32M=y
-        CONFIG_FIRMWARE_ENABLE_USB=y
-        CONFIG_FIRMWARE_INCLUDE_HTTPS=y
-        CONFIG_FIRMWARE_INCLUDE_SFTP=y
-        CONFIG_FIRMWARE_INCLUDE_DROPBEAR=y
-        CONFIG_FIRMWARE_WIFI2_DRIVER=3.0
-        CONFIG_FIRMWARE_WIFI5_DRIVER=3.0
-        CONFIG_FIRMWARE_ENABLE_IPV6=y
-        EOF
+        # 改用 echo 逐行写入，避免 EOF 解析错误
+        echo "CONFIG_VENDOR=ralink" > "$TARGET_PROFILE.config"
+        echo "CONFIG_PRODUCT=MT7621" >> "$TARGET_PROFILE.config"
+        echo "CONFIG_LINUXDIR=$KERNEL_DIR_NAME" >> "$TARGET_PROFILE.config"
+        echo "CONFIG_FIRMWARE_PRODUCT_ID=\"NEWIFI3\"" >> "$TARGET_PROFILE.config"
+        echo "CONFIG_FIRMWARE_CPU_MT7621=y" >> "$TARGET_PROFILE.config"
+        echo "CONFIG_FIRMWARE_MEMORY_512M=y" >> "$TARGET_PROFILE.config"
+        echo "CONFIG_FIRMWARE_FLASH_32M=y" >> "$TARGET_PROFILE.config"
+        echo "CONFIG_FIRMWARE_ENABLE_USB=y" >> "$TARGET_PROFILE.config"
+        echo "CONFIG_FIRMWARE_INCLUDE_HTTPS=y" >> "$TARGET_PROFILE.config"
+        echo "CONFIG_FIRMWARE_INCLUDE_SFTP=y" >> "$TARGET_PROFILE.config"
+        echo "CONFIG_FIRMWARE_INCLUDE_DROPBEAR=y" >> "$TARGET_PROFILE.config"
+        echo "CONFIG_FIRMWARE_WIFI2_DRIVER=3.0" >> "$TARGET_PROFILE.config"
+        echo "CONFIG_FIRMWARE_WIFI5_DRIVER=3.0" >> "$TARGET_PROFILE.config"
+        echo "CONFIG_FIRMWARE_ENABLE_IPV6=y" >> "$TARGET_PROFILE.config"
         
-        cd $WORK_DIR/trunk
+        cd "$WORK_DIR/trunk"
         TEMPLATE_PATH="configs/templates/$TARGET_PROFILE.config"
 
         # =======================================================
         # 5. 准备 Toolchain
         # =======================================================
         echo "Preparing Toolchain..."
-        cd $TOOLCHAIN_DIR
+        cd "$TOOLCHAIN_DIR"
         sh dl_toolchain.sh
         
         echo "Setting up symlink for toolchain..."
@@ -150,11 +151,51 @@ jobs:
         # =======================================================
         # 6. 修改配置
         # =======================================================
-        cd $WORK_DIR/trunk
+        cd "$WORK_DIR/trunk"
         echo "Customizing $TEMPLATE_PATH..."
         
-        sed -i '/CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD/d' $TEMPLATE_PATH
-        echo "CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=y
+        sed -i '/CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD/d' "$TEMPLATE_PATH"
+        echo "CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=y" >> "$TEMPLATE_PATH"
+        
+        # 净化插件列表
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_ARIA/d' "$TEMPLATE_PATH"
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION/d' "$TEMPLATE_PATH"
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_WGET/d' "$TEMPLATE_PATH"
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_OPENVPN/d' "$TEMPLATE_PATH"
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS/d' "$TEMPLATE_PATH"
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_TROJAN/d' "$TEMPLATE_PATH"
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_V2RAY/d' "$TEMPLATE_PATH"
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_XRAY/d' "$TEMPLATE_PATH"
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_SOFTETHERVPN/d' "$TEMPLATE_PATH"
+
+        # 使用 echo 追加配置
+        echo "CONFIG_FIRMWARE_INCLUDE_ARIA=n" >> "$TEMPLATE_PATH"
+        echo "CONFIG_FIRMWARE_INCLUDE_TRANSMISSION=n" >> "$TEMPLATE_PATH"
+        echo "CONFIG_FIRMWARE_INCLUDE_WGET=n" >> "$TEMPLATE_PATH"
+        echo "CONFIG_FIRMWARE_INCLUDE_OPENVPN=n" >> "$TEMPLATE_PATH"
+        echo "CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=n" >> "$TEMPLATE_PATH"
+        echo "CONFIG_FIRMWARE_INCLUDE_SSSERVER=n" >> "$TEMPLATE_PATH"
+        echo "CONFIG_FIRMWARE_INCLUDE_TROJAN=n" >> "$TEMPLATE_PATH"
+        echo "CONFIG_FIRMWARE_INCLUDE_V2RAY=n" >> "$TEMPLATE_PATH"
+        echo "CONFIG_FIRMWARE_INCLUDE_XRAY=n" >> "$TEMPLATE_PATH"
+        echo "CONFIG_FIRMWARE_INCLUDE_SOFTETHERVPN_SERVER=n" >> "$TEMPLATE_PATH"
+
+        # =======================================================
+        # 7. 开始编译
+        # =======================================================
+        cp -f "$TEMPLATE_PATH" .config
+        
+        echo "Starting Pre-build (Libs)..."
+        export LC_ALL=C
+        
+        make clean
+        
+        # 先编译基础库
+        fakeroot make libs
+        
+        echo "Starting Full Build..."
+        # 编译完整固件
+        fakeroot ./build_firmware "$TARGET_PROFILE"
         
     - name: Organize Artifacts
       run: |
