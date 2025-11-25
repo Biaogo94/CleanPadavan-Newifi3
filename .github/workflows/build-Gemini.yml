@@ -74,6 +74,7 @@ jobs:
             echo "Applying strict fixes for 3.4..."
             
             # --- Fix 1: xz (Tools) ---
+            # 禁用 NLS，跳过 po 目录
             MKSQ_MAKEFILE="$WORK_DIR/trunk/tools/mksquashfs_xz/Makefile"
             if [ -f "$MKSQ_MAKEFILE" ]; then
                 sed -i 's/.\/configure/.\/configure --disable-nls/g' "$MKSQ_MAKEFILE"
@@ -84,6 +85,7 @@ jobs:
             fi
             
             # --- Fix 2: e2fsprogs (User) ---
+            # 屏蔽不支持的宏
             E2FS_CFG="$WORK_DIR/trunk/user/e2fsprogs/configure"
             if [ -f "$E2FS_CFG" ]; then
                 sed -i 's/AM_GNU_GETTEXT(external)/# AM_GNU_GETTEXT(external)/g' "$E2FS_CFG"
@@ -91,14 +93,18 @@ jobs:
                 touch "$E2FS_CFG"
             fi
 
-            # --- Fix 3: dropbear (User) --- [绝对修正]
-            # 使用单引号包裹 sed 命令，防止 Shell 转义干扰
-            # 将变量放在 ./configure 之前作为环境变量传递，这是处理带空格变量最安全的方式
+            # --- Fix 3: dropbear (User) --- [绝杀修正]
             DROPBEAR_MK="$WORK_DIR/trunk/user/dropbear/Makefile"
             if [ -f "$DROPBEAR_MK" ]; then
                 echo "Patching dropbear Makefile..."
-                # 替换 ./configure 为 CC="..." CFLAGS="..." ./configure
-                sed -i 's|./configure|CC="$(CC)" CFLAGS="$(CFLAGS)" LDFLAGS="$(LDFLAGS)" ./configure|g' "$DROPBEAR_MK"
+                
+                # 步骤A: 删除 autoreconf -v; 防止它重新生成配置脚本导致兼容性问题
+                # 这一步非常关键！阻止 Ubuntu 22.04 的新工具破坏老源码逻辑
+                sed -i 's/autoreconf -v;//g' "$DROPBEAR_MK"
+                
+                # 步骤B: 注入环境变量，特别是 LIBS="-lz -lcrypt"
+                # 这强制编译器在检测时链接 zlib 和 crypt 库
+                sed -i "s|./configure|CC=\$(CC) CFLAGS=\"\$(CFLAGS)\" LDFLAGS=\"\$(LDFLAGS)\" LIBS=\"-lz -lcrypt\" ./configure|g" "$DROPBEAR_MK"
             fi
         fi
 
@@ -153,7 +159,6 @@ jobs:
         sed -i '/CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD/d' "$TEMPLATE_PATH"
         echo "CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=y" >> "$TEMPLATE_PATH"
         
-        # 净化插件列表
         sed -i '/CONFIG_FIRMWARE_INCLUDE_ARIA/d' "$TEMPLATE_PATH"
         sed -i '/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION/d' "$TEMPLATE_PATH"
         sed -i '/CONFIG_FIRMWARE_INCLUDE_WGET/d' "$TEMPLATE_PATH"
@@ -185,11 +190,10 @@ jobs:
         
         make clean
         
-        # 先编译基础库
+        # 必须先编译基础库！
         fakeroot make libs
         
         echo "Starting Full Build..."
-        # 编译完整固件
         fakeroot ./build_firmware "$TARGET_PROFILE"
         
     - name: Organize Artifacts
