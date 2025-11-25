@@ -33,7 +33,7 @@ jobs:
           python3-docutils autopoint texinfo
         sudo apt-get clean
 
-    - name: Run Compilation Logic
+        - name: Run Compilation Logic
       run: |
         # =======================================================
         # 1. 初始化与变量定义
@@ -74,7 +74,6 @@ jobs:
             echo "Applying strict fixes for 3.4..."
             
             # --- Fix 1: xz (Tools) ---
-            # 禁用 NLS，跳过 po 目录，解决 mv: cannot stat 't-fr.gmo'
             MKSQ_MAKEFILE="$WORK_DIR/trunk/tools/mksquashfs_xz/Makefile"
             if [ -f "$MKSQ_MAKEFILE" ]; then
                 sed -i 's/.\/configure/.\/configure --disable-nls/g' "$MKSQ_MAKEFILE"
@@ -85,7 +84,6 @@ jobs:
             fi
             
             # --- Fix 2: e2fsprogs (User) ---
-            # 屏蔽不支持的宏
             E2FS_CFG="$WORK_DIR/trunk/user/e2fsprogs/configure"
             if [ -f "$E2FS_CFG" ]; then
                 sed -i 's/AM_GNU_GETTEXT(external)/# AM_GNU_GETTEXT(external)/g' "$E2FS_CFG"
@@ -93,24 +91,27 @@ jobs:
                 touch "$E2FS_CFG"
             fi
 
-            # --- Fix 3: dropbear (User) --- [关键修正]
+            # --- Fix 3: dropbear (User) --- [V18 强力版]
             DROPBEAR_MK="$WORK_DIR/trunk/user/dropbear/Makefile"
             if [ -f "$DROPBEAR_MK" ]; then
+                echo "DEBUG: Original dropbear Makefile content (head):"
+                head -n 20 "$DROPBEAR_MK"
+                
                 echo "Patching dropbear Makefile..."
-                # 1. 移除 autoreconf 防止新版本工具破坏配置
+                # 1. 移除 autoreconf
                 sed -i 's/autoreconf -v;//g' "$DROPBEAR_MK"
                 
-                # 2. 移除旧的未加引号的参数，防止冲突
-                # 使用转义 \$ 来匹配 literal $
-                sed -i 's/CC=\$(CC)//g' "$DROPBEAR_MK"
-                sed -i 's/CFLAGS=\$(CFLAGS)//g' "$DROPBEAR_MK"
-                sed -i 's/LDFLAGS=\$(LDFLAGS)//g' "$DROPBEAR_MK"
+                # 2. 使用增强正则 (-E) 清理所有形式的 CC=$(CC) 参数 (包括空格)
+                sed -i -E 's/CC\s*=\s*\$\(CC\)//g' "$DROPBEAR_MK"
+                sed -i -E 's/CFLAGS\s*=\s*\$\(CFLAGS\)//g' "$DROPBEAR_MK"
+                sed -i -E 's/LDFLAGS\s*=\s*\$\(LDFLAGS\)//g' "$DROPBEAR_MK"
                 
-                # 3. 注入带引号的环境变量和 LIBS
-                # 使用单引号 '...' 确保内部的双引号 "..." 被原样写入 Makefile
-                # 这样 CC="$(CC)" 会被 Shell 正确识别，不会报 -mips32r2 not found
-                # LIBS="-lz -lcrypt" 解决 zlib missing
-                sed -i 's|./configure|CC="$(CC)" CFLAGS="$(CFLAGS)" LDFLAGS="$(LDFLAGS)" LIBS="-lz -lcrypt" ./configure|g' "$DROPBEAR_MK"
+                # 3. 使用 export 方式传递变量，这是最稳妥的方法
+                # 这样 configure 直接从环境变量读取，完全避开参数解析问题
+                sed -i 's|./configure|export CC="$(CC)"; export CFLAGS="$(CFLAGS)"; export LDFLAGS="$(LDFLAGS)"; export LIBS="-lz -lcrypt"; ./configure|g' "$DROPBEAR_MK"
+                
+                echo "DEBUG: Patched dropbear Makefile content (configured line):"
+                grep "./configure" "$DROPBEAR_MK"
             fi
         fi
 
@@ -120,7 +121,6 @@ jobs:
         cd "$WORK_DIR/trunk/configs/templates"
         
         echo "Injecting FULL Standard Config for $TARGET_PROFILE..."
-        # 使用 echo 逐行写入，避免 EOF 解析错误
         echo "CONFIG_VENDOR=ralink" > "$TARGET_PROFILE.config"
         echo "CONFIG_PRODUCT=MT7621" >> "$TARGET_PROFILE.config"
         echo "CONFIG_LINUXDIR=$KERNEL_DIR_NAME" >> "$TARGET_PROFILE.config"
@@ -146,12 +146,10 @@ jobs:
         cd "$TOOLCHAIN_DIR"
         sh dl_toolchain.sh
         
-        # 建立软链接，欺骗老源码的硬编码路径
         echo "Setting up symlink for toolchain..."
         sudo mkdir -p /opt/rt-n56u
         sudo ln -sf "$TOOLCHAIN_DIR/toolchain-3.4.x" /opt/rt-n56u/toolchain-mipsel
         
-        # 强制导出 PATH
         export PATH="/opt/rt-n56u/toolchain-mipsel/bin:$PATH"
         
         if ! command -v mipsel-linux-uclibc-gcc &> /dev/null; then
@@ -160,7 +158,7 @@ jobs:
         fi
 
         # =======================================================
-        # 6. 修改配置 (插件净化)
+        # 6. 修改配置
         # =======================================================
         cd "$WORK_DIR/trunk"
         echo "Customizing $TEMPLATE_PATH..."
@@ -168,7 +166,7 @@ jobs:
         sed -i '/CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD/d' "$TEMPLATE_PATH"
         echo "CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=y" >> "$TEMPLATE_PATH"
         
-        # 先删除，防止重复
+        # 净化插件列表
         sed -i '/CONFIG_FIRMWARE_INCLUDE_ARIA/d' "$TEMPLATE_PATH"
         sed -i '/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION/d' "$TEMPLATE_PATH"
         sed -i '/CONFIG_FIRMWARE_INCLUDE_WGET/d' "$TEMPLATE_PATH"
@@ -179,7 +177,6 @@ jobs:
         sed -i '/CONFIG_FIRMWARE_INCLUDE_XRAY/d' "$TEMPLATE_PATH"
         sed -i '/CONFIG_FIRMWARE_INCLUDE_SOFTETHERVPN/d' "$TEMPLATE_PATH"
 
-        # 再写入
         echo "CONFIG_FIRMWARE_INCLUDE_ARIA=n" >> "$TEMPLATE_PATH"
         echo "CONFIG_FIRMWARE_INCLUDE_TRANSMISSION=n" >> "$TEMPLATE_PATH"
         echo "CONFIG_FIRMWARE_INCLUDE_WGET=n" >> "$TEMPLATE_PATH"
@@ -197,18 +194,17 @@ jobs:
         cp -f "$TEMPLATE_PATH" .config
         
         echo "Starting Pre-build (Libs)..."
-        # 强制语言环境
         export LC_ALL=C
         
-        # 清理残余
         make clean
         
-        # 【关键步骤】先编译基础库，确保 zlib/openssl 就位
-        fakeroot make libs
+        # 必须先编译基础库！
+        # 如果这一步失败，直接退出，不要继续 build_firmware
+        fakeroot make libs || exit 1
         
         echo "Starting Full Build..."
-        # 编译完整固件
         fakeroot ./build_firmware "$TARGET_PROFILE"
+
         
     - name: Organize Artifacts
       run: |
