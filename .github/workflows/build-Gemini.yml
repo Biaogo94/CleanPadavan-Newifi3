@@ -36,7 +36,7 @@ jobs:
     - name: Run Compilation Logic
       run: |
         # =======================================================
-        # 1. 初始化设置
+        # 1. 初始化与变量定义
         # =======================================================
         WORK_DIR="$GITHUB_WORKSPACE/padavan"
         mkdir -p $WORK_DIR
@@ -44,17 +44,21 @@ jobs:
         CURRENT_DATE=$(date +%Y%m%d)
         echo "DATE=$CURRENT_DATE" >> $GITHUB_ENV
         
-        # 设定源
+        # 判断版本并设置仓库
         if [[ "${{ inputs.target_version }}" == *"3.4"* ]]; then
           REPO_URL="https://github.com/hanwckf/rt-n56u.git"
           REPO_BRANCH="master"
-          echo "Build Target: 3.4 (hanwckf)"
+          echo "Selected Version: 3.4 (hanwckf)"
           echo "BUILD_VER=3.4" >> $GITHUB_ENV
+          # 3.4 版本习惯用大写文件名
+          TARGET_PROFILE="NEWIFI3"
         else
           REPO_URL="https://github.com/MeIsReallyBa/padavan-4.4.git"
           REPO_BRANCH="main"
-          echo "Build Target: 4.4 (MeIsReallyBa)"
+          echo "Selected Version: 4.4 (MeIsReallyBa)"
           echo "BUILD_VER=4.4" >> $GITHUB_ENV
+          # 4.4 版本习惯用小写文件名
+          TARGET_PROFILE="newifi3"
         fi
         
         # =======================================================
@@ -64,93 +68,110 @@ jobs:
         git clone --depth=1 --branch $REPO_BRANCH $REPO_URL $WORK_DIR
         
         # =======================================================
-        # 3. 兼容性修复 (仅针对 3.4 版本)
+        # 3. 【核心修复】针对 3.4 版本的兼容性处理 (必做)
         # =======================================================
         if [[ "${{ inputs.target_version }}" == *"3.4"* ]]; then
-            echo "Running fixes for 3.4..."
-            # 修复 xz 编译问题
-            sed -i 's/ po / /g' "$WORK_DIR/trunk/tools/mksquashfs_xz/xz-5.2.4/Makefile.in" 2>/dev/null || true
+            echo "Applying strict fixes for 3.4..."
+            
+            # --- Fix 1: xz-5.2.4 编译报错 (po 目录) ---
+            sed -i 's/ po / /g' "$WORK_DIR/trunk/tools/mksquashfs_xz/xz-5.2.4/Makefile.in"
             sed -i 's/ po / /g' "$WORK_DIR/trunk/tools/mksquashfs_xz/xz-5.2.4/Makefile" 2>/dev/null || true
             
-            # 修复 e2fsprogs 配置
-            if [ -d "$WORK_DIR/trunk/user/e2fsprogs" ]; then
-                cd $WORK_DIR/trunk/user/e2fsprogs
-                rm -f aclocal.m4
-                autoreconf -i -v -f
+            # --- Fix 2: e2fsprogs 编译报错 (AM_GNU_GETTEXT) ---
+            E2FS_CFG="$WORK_DIR/trunk/user/e2fsprogs/configure"
+            if [ -f "$E2FS_CFG" ]; then
+                echo "Patching e2fsprogs/configure directly..."
+                sed -i 's/AM_GNU_GETTEXT(external)/# AM_GNU_GETTEXT(external)/g' $E2FS_CFG
+                sed -i 's/AM_GNU_GETTEXT_VERSION/# AM_GNU_GETTEXT_VERSION/g' $E2FS_CFG
+                touch $E2FS_CFG
             fi
         fi
 
         # =======================================================
-        # 4. 准备 Toolchain
+        # 4. 【注入配置】无中生有，生成 Newifi3 配置文件
         # =======================================================
-        cd $WORK_DIR/toolchain-mipsel
-        # 4.4 版本通常需要清理一下旧的链接以防万一
-        sh dl_toolchain.sh
+        cd $WORK_DIR/trunk/configs/templates
         
-        # =======================================================
-        # 5. 【终极修复】智能搜索 Newifi3 配置文件
-        # =======================================================
-        cd $WORK_DIR/trunk
+        echo "Injecting Custom Config for $TARGET_PROFILE..."
         
-        echo "Searching for Newifi3 config file..."
-        
-        # 使用 find 命令模糊查找，忽略大小写 (-iname)，找到包含 newifi3 的 .config 文件
-        # 结果通常是: configs/templates/newifi3.config 或 configs/templates/NEWIFI3.config
-        CONF_PATH=$(find configs/templates -type f -iname "*newifi3.config" | head -n 1)
-        
-        # 如果没找到 newifi3，尝试找 d2
-        if [ -z "$CONF_PATH" ]; then
-            CONF_PATH=$(find configs/templates -type f -iname "*d2.config" | head -n 1)
-        fi
+        # 这是一个标准的 Newifi3 D2 基础配置
+        cat <<EOF > $TARGET_PROFILE.config
+        CONFIG_FIRMWARE_PRODUCT_ID="NEWIFI3"
+        CONFIG_FIRMWARE_CPU_MT7621=y
+        CONFIG_FIRMWARE_MEMORY_512M=y
+        CONFIG_FIRMWARE_FLASH_32M=y
+        CONFIG_FIRMWARE_ENABLE_USB=y
+        CONFIG_FIRMWARE_INCLUDE_HTTPS=y
+        CONFIG_FIRMWARE_INCLUDE_SFTP=y
+        CONFIG_FIRMWARE_INCLUDE_DROPBEAR=y
+        # 基础驱动配置
+        CONFIG_FIRMWARE_WIFI2_DRIVER=3.0
+        CONFIG_FIRMWARE_WIFI5_DRIVER=3.0
+        CONFIG_FIRMWARE_ENABLE_IPV6=y
+        EOF
 
-        # 检查是否真的找到了
-        if [ -z "$CONF_PATH" ]; then
-            echo "FATAL ERROR: Could not find any config file matching 'newifi3' or 'd2'!"
-            echo "Listing all available templates for debugging:"
-            ls -R configs/templates
+        # 验证文件是否创建成功
+        if [ -f "$TARGET_PROFILE.config" ]; then
+            echo "✅ Config file created successfully: $TARGET_PROFILE.config"
+        else
+            echo "❌ Failed to create config file!"
             exit 1
         fi
         
-        # 提取文件名（不带路径和后缀），例如 "newifi3" 或 "NEWIFI3"
-        TARGET_DEVICE=$(basename "$CONF_PATH" .config)
-        
-        echo "✅ FOUND CONFIG: $CONF_PATH"
-        echo "✅ TARGET DEVICE ID: $TARGET_DEVICE"
-        
-        TEMPLATE_PATH="configs/templates/$TARGET_DEVICE.config"
+        # 回到 trunk 目录
+        cd $WORK_DIR/trunk
+        TEMPLATE_PATH="configs/templates/$TARGET_PROFILE.config"
 
         # =======================================================
-        # 6. 修改配置 (插件净化)
+        # 5. 准备 Toolchain
+        # =======================================================
+        echo "Preparing Toolchain..."
+        cd $WORK_DIR/toolchain-mipsel
+        sh dl_toolchain.sh
+        cd $WORK_DIR/trunk
+
+        # =======================================================
+        # 6. 修改配置 (插件净化与优化)
         # =======================================================
         echo "Customizing $TEMPLATE_PATH..."
         
-        # 4.4 和 3.4 通用的清理逻辑
-        # 使用通配符匹配可能存在的空格或不同写法
-        sed -i 's/^CONFIG_FIRMWARE_INCLUDE_ARIA=y/CONFIG_FIRMWARE_INCLUDE_ARIA=n/g' $TEMPLATE_PATH
-        sed -i 's/^CONFIG_FIRMWARE_INCLUDE_TRANSMISSION=y/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION=n/g' $TEMPLATE_PATH
-        sed -i 's/^CONFIG_FIRMWARE_INCLUDE_WGET=y/CONFIG_FIRMWARE_INCLUDE_WGET=n/g' $TEMPLATE_PATH
-        sed -i 's/^CONFIG_FIRMWARE_INCLUDE_OPENVPN=y/CONFIG_FIRMWARE_INCLUDE_OPENVPN=n/g' $TEMPLATE_PATH
+        # 1. 确保 Flow Offload 开启
+        sed -i '/CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD/d' $TEMPLATE_PATH
+        echo "CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=y" >> $TEMPLATE_PATH
         
-        # MeIsReallyBa 4.4 源码特有的插件宏可能不同，这里尝试通杀
-        sed -i 's/^CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=y/CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=n/g' $TEMPLATE_PATH
-        sed -i 's/^CONFIG_FIRMWARE_INCLUDE_TROJAN=y/CONFIG_FIRMWARE_INCLUDE_TROJAN=n/g' $TEMPLATE_PATH
-        sed -i 's/^CONFIG_FIRMWARE_INCLUDE_V2RAY=y/CONFIG_FIRMWARE_INCLUDE_V2RAY=n/g' $TEMPLATE_PATH
-        
-        # 启用 Flow Offload (硬件加速)
-        sed -i 's/^CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=n/CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=y/g' $TEMPLATE_PATH
-        if ! grep -q "CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD" $TEMPLATE_PATH; then
-             echo "CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=y" >> $TEMPLATE_PATH
-        fi
+        # 2. 移除常见的重型/不必要插件 (强制写入 n)
+        # 我们先把这些选项删掉，然后统一追加，确保不重复
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_ARIA/d' $TEMPLATE_PATH
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION/d' $TEMPLATE_PATH
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_WGET/d' $TEMPLATE_PATH
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_OPENVPN/d' $TEMPLATE_PATH
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS/d' $TEMPLATE_PATH
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_TROJAN/d' $TEMPLATE_PATH
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_V2RAY/d' $TEMPLATE_PATH
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_XRAY/d' $TEMPLATE_PATH
+        sed -i '/CONFIG_FIRMWARE_INCLUDE_SOFTETHERVPN/d' $TEMPLATE_PATH
+
+        cat <<EOF >> $TEMPLATE_PATH
+        CONFIG_FIRMWARE_INCLUDE_ARIA=n
+        CONFIG_FIRMWARE_INCLUDE_TRANSMISSION=n
+        CONFIG_FIRMWARE_INCLUDE_WGET=n
+        CONFIG_FIRMWARE_INCLUDE_OPENVPN=n
+        CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=n
+        CONFIG_FIRMWARE_INCLUDE_SSSERVER=n
+        CONFIG_FIRMWARE_INCLUDE_TROJAN=n
+        CONFIG_FIRMWARE_INCLUDE_V2RAY=n
+        CONFIG_FIRMWARE_INCLUDE_XRAY=n
+        CONFIG_FIRMWARE_INCLUDE_SOFTETHERVPN_SERVER=n
+        EOF
 
         # =======================================================
         # 7. 开始编译
         # =======================================================
-        # 生成 .config
         cp -f $TEMPLATE_PATH .config
         
-        echo "Running build_firmware..."
-        # 注意：4.4 的脚本对参数大小写可能敏感，但我们上面已经动态提取了正确的大小写 ID
-        fakeroot ./build_firmware $TARGET_DEVICE
+        echo "Starting Build for $TARGET_PROFILE..."
+        # 使用 fakeroot 运行构建脚本
+        fakeroot ./build_firmware $TARGET_PROFILE
         
     - name: Organize Artifacts
       run: |
