@@ -33,7 +33,7 @@ jobs:
           python3-docutils autopoint texinfo
         sudo apt-get clean
 
-        - name: Run Compilation Logic
+    - name: Run Compilation Logic
       run: |
         # =======================================================
         # 1. 初始化与变量定义
