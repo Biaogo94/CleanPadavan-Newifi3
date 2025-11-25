@@ -41,20 +41,16 @@ jobs:
         WORK_DIR="$GITHUB_WORKSPACE/padavan"
         mkdir -p $WORK_DIR
         
-        # 定义工具链存放路径
         TOOLCHAIN_DIR="$WORK_DIR/toolchain-mipsel"
         
         CURRENT_DATE=$(date +%Y%m%d)
         echo "DATE=$CURRENT_DATE" >> $GITHUB_ENV
         
-        # 判断版本
         if [[ "${{ inputs.target_version }}" == *"3.4"* ]]; then
           REPO_URL="https://github.com/hanwckf/rt-n56u.git"
           REPO_BRANCH="master"
           echo "Selected Version: 3.4 (hanwckf)"
           echo "BUILD_VER=3.4" >> $GITHUB_ENV
-          
-          # 3.4 关键参数
           TARGET_PROFILE="NEWIFI3"
           KERNEL_DIR_NAME="linux-3.4.x"
         else
@@ -62,8 +58,6 @@ jobs:
           REPO_BRANCH="main"
           echo "Selected Version: 4.4 (MeIsReallyBa)"
           echo "BUILD_VER=4.4" >> $GITHUB_ENV
-          
-          # 4.4 关键参数
           TARGET_PROFILE="newifi3"
           KERNEL_DIR_NAME="linux-4.4.x"
         fi
@@ -80,14 +74,14 @@ jobs:
         if [[ "${{ inputs.target_version }}" == *"3.4"* ]]; then
             echo "Applying strict fixes for 3.4..."
             
-            # --- Fix 1: xz (彻底移除 po) ---
+            # Fix 1: xz (彻底移除 po)
             XZ_MAKEFILE="$WORK_DIR/trunk/tools/mksquashfs_xz/xz-5.2.4/Makefile.in"
             if [ -f "$XZ_MAKEFILE" ]; then
                 sed -i 's/^SUBDIRS =.*/SUBDIRS = src/g' "$XZ_MAKEFILE"
                 sed -i 's/^SUBDIRS =.*/SUBDIRS = src/g' "$WORK_DIR/trunk/tools/mksquashfs_xz/xz-5.2.4/Makefile" 2>/dev/null || true
             fi
             
-            # --- Fix 2: e2fsprogs (configure) ---
+            # Fix 2: e2fsprogs (configure)
             E2FS_CFG="$WORK_DIR/trunk/user/e2fsprogs/configure"
             if [ -f "$E2FS_CFG" ]; then
                 sed -i 's/AM_GNU_GETTEXT(external)/# AM_GNU_GETTEXT(external)/g' $E2FS_CFG
@@ -97,13 +91,11 @@ jobs:
         fi
 
         # =======================================================
-        # 4. 【注入配置】生成完整标准配置 (关键修复点)
+        # 4. 【注入配置】生成完整标准配置
         # =======================================================
         cd $WORK_DIR/trunk/configs/templates
         
         echo "Injecting FULL Standard Config for $TARGET_PROFILE..."
-        
-        # 之前的版本缺少了前三行，导致内核路径和厂商识别失败！
         cat <<EOF > $TARGET_PROFILE.config
         CONFIG_VENDOR=ralink
         CONFIG_PRODUCT=MT7621
@@ -125,27 +117,23 @@ jobs:
         TEMPLATE_PATH="configs/templates/$TARGET_PROFILE.config"
 
         # =======================================================
-        # 5. 准备 Toolchain (硬编码路径欺骗法)
+        # 5. 准备 Toolchain
         # =======================================================
         echo "Preparing Toolchain..."
         cd $TOOLCHAIN_DIR
         sh dl_toolchain.sh
         
-        # 关键修复：老源码死磕 /opt/rt-n56u/toolchain-mipsel，我们直接满足它
+        # 建立软链接
         echo "Setting up symlink for toolchain..."
         sudo mkdir -p /opt/rt-n56u
-        # 将下载好的工具链链接到标准位置
         sudo ln -sf "$TOOLCHAIN_DIR/toolchain-3.4.x" /opt/rt-n56u/toolchain-mipsel
         
-        # 同时把 bin 加入 PATH，双重保险
         export PATH="/opt/rt-n56u/toolchain-mipsel/bin:$PATH"
         
-        # 验证
         if ! command -v mipsel-linux-uclibc-gcc &> /dev/null; then
             echo "ERROR: Toolchain setup failed!"
             exit 1
         fi
-        echo "Compiler ready at: $(which mipsel-linux-uclibc-gcc)"
 
         # =======================================================
         # 6. 修改配置
@@ -180,16 +168,22 @@ jobs:
         EOF
 
         # =======================================================
-        # 7. 开始编译
+        # 7. 开始编译 (关键修改：分步构建)
         # =======================================================
         cp -f $TEMPLATE_PATH .config
         
-        echo "Starting Build for $TARGET_PROFILE..."
-        
-        # 清除语言环境防止乱码干扰编译
+        echo "Starting Pre-build (Libs)..."
         export LC_ALL=C
         
-        # 必须使用 fakeroot
+        # 1. 先清理环境
+        make clean
+        
+        # 2. 【核心】强制先编译 libs (包含 zlib, openssl 等)
+        # 这一步是为了确保 dropbear 等应用能找到依赖
+        fakeroot make libs
+        
+        echo "Starting Full Build..."
+        # 3. 再编译完整固件
         fakeroot ./build_firmware $TARGET_PROFILE
         
     - name: Organize Artifacts
