@@ -1,4 +1,4 @@
-name: Build Newifi3 D2 Padavan (Gemini 3 Pro)
+name: Build Newifi3 D2 Padavan (Robust 22.04)
 
 on:
   workflow_dispatch:
@@ -18,25 +18,48 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    
+
+    env:
+      # 【核心优化】强制 GCC 使用旧标准，解决 "multiple definition" 错误
+      CFLAGS: "-fcommon -O2"
+      CXXFLAGS: "-fcommon -O2"
+      # 【核心优化】解决 Glibc 移除 RPC 导致的头文件丢失
+      CPPFLAGS: "-I/usr/include/tirpc"
+      # 防止交互式提示卡死
+      DEBIAN_FRONTEND: noninteractive
+
     steps:
-    - name: Checkout CI Scripts
+    - name: Checkout Source
       uses: actions/checkout@v4
 
-    - name: Prepare Environment
+    - name: Prepare Robust Environment
       run: |
         sudo apt-get update
+        
+        # 1. 安装核心编译工具
         sudo apt-get install -y \
-          libtool-bin curl cmake gperf gawk flex bison \
+          build-essential libtool-bin curl cmake gperf gawk flex bison \
           nano xxd fakeroot kmod cpio git-doc vim-common \
           libncurses5-dev libncurses5 \
-          python3-docutils autopoint texinfo
+          python3-docutils autopoint texinfo unzip \
+          gettext automake \
+          python3-pip python3-setuptools \
+          libtirpc-dev  # 【关键】修复 rpc/rpc.h 缺失
+
+        # 2. 安装 Python 2 (Padavan 旧脚本可能依赖)
+        sudo apt-get install -y python2
+        # 建立软链接，让 python 指向 python2 (可选，视源码具体依赖而定，安全起见不强制全局替换)
+        
+        # 3. 彻底清理环境
         sudo apt-get clean
+        
+        # 4. 设置时区（防止某些构建工具校验时间报错）
+        sudo timedatectl set-timezone Asia/Shanghai
 
     - name: Run Compilation Logic
       run: |
         # =======================================================
-        # 1. 初始化与变量定义
+        # 1. 变量定义
         # =======================================================
         WORK_DIR="$GITHUB_WORKSPACE/padavan"
         mkdir -p "$WORK_DIR"
@@ -48,14 +71,12 @@ jobs:
         if [[ "${{ inputs.target_version }}" == *"3.4"* ]]; then
           REPO_URL="https://github.com/hanwckf/rt-n56u.git"
           REPO_BRANCH="master"
-          echo "Selected Version: 3.4 (hanwckf)"
           echo "BUILD_VER=3.4" >> $GITHUB_ENV
           TARGET_PROFILE="NEWIFI3"
           KERNEL_DIR_NAME="linux-3.4.x"
         else
           REPO_URL="https://github.com/MeIsReallyBa/padavan-4.4.git"
           REPO_BRANCH="main"
-          echo "Selected Version: 4.4 (MeIsReallyBa)"
           echo "BUILD_VER=4.4" >> $GITHUB_ENV
           TARGET_PROFILE="newifi3"
           KERNEL_DIR_NAME="linux-4.4.x"
@@ -64,167 +85,144 @@ jobs:
         # =======================================================
         # 2. 拉取源码
         # =======================================================
-        echo "Cloning source code..."
+        echo "Cloning source from $REPO_URL [$REPO_BRANCH]..."
         git clone --depth=1 --branch $REPO_BRANCH $REPO_URL "$WORK_DIR"
         
         # =======================================================
-        # 3. 【全能修复包】针对 3.4 版本的核心修复
+        # 3. 【深度修复】针对 Ubuntu 22.04 的外科手术式修改
         # =======================================================
         if [[ "${{ inputs.target_version }}" == *"3.4"* ]]; then
-            echo "Applying strict fixes for 3.4..."
+            echo "Applying CRITICAL fixes for 3.4 on Ubuntu 22.04..."
             
-            # --- Fix 1: xz (Tools) ---
+            # --- Fix 1: xz 工具配置 (移除 NLS 支持防止报错) ---
             MKSQ_MAKEFILE="$WORK_DIR/trunk/tools/mksquashfs_xz/Makefile"
-            if [ -f "$MKSQ_MAKEFILE" ]; then
-                sed -i 's/.\/configure/.\/configure --disable-nls/g' "$MKSQ_MAKEFILE"
-            fi
-            XZ_SRC="$WORK_DIR/trunk/tools/mksquashfs_xz/xz-5.2.4"
-            if [ -f "$XZ_SRC/Makefile.in" ]; then
-                sed -i 's/SUBDIRS.*=.*/SUBDIRS = src/g' "$XZ_SRC/Makefile.in"
-            fi
+            [ -f "$MKSQ_MAKEFILE" ] && sed -i 's/.\/configure/.\/configure --disable-nls/g' "$MKSQ_MAKEFILE"
             
-            # --- Fix 2: e2fsprogs (User) ---
-            E2FS_CFG="$WORK_DIR/trunk/user/e2fsprogs/configure"
-            if [ -f "$E2FS_CFG" ]; then
-                sed -i 's/AM_GNU_GETTEXT(external)/# AM_GNU_GETTEXT(external)/g' "$E2FS_CFG"
-                sed -i 's/AM_GNU_GETTEXT_VERSION/# AM_GNU_GETTEXT_VERSION/g' "$E2FS_CFG"
-                touch "$E2FS_CFG"
-            fi
+            XZ_SRC="$WORK_DIR/trunk/tools/mksquashfs_xz/xz-5.2.4"
+            [ -f "$XZ_SRC/Makefile.in" ] && sed -i 's/SUBDIRS.*=.*/SUBDIRS = src/g' "$XZ_SRC/Makefile.in"
+            
+            # --- Fix 2: 修复 tar.c 中的 glibc 兼容性问题 (如果有) ---
+            # 某些旧版 busybox 在新 glibc 下会因为 sys/sysmacros.h 报错，这里预加载修复
+            find "$WORK_DIR" -name "*.c" -print0 | xargs -0 sed -i 's/#include <sys\/types.h>/#include <sys\/types.h>\n#include <sys\/sysmacros.h>/g' 2>/dev/null || true
 
-            # --- Fix 3: dropbear (User) --- [V18 强力版]
+            # --- Fix 3: Dropbear (针对 hanwckf 3.4) ---
             DROPBEAR_MK="$WORK_DIR/trunk/user/dropbear/Makefile"
             if [ -f "$DROPBEAR_MK" ]; then
-                echo "DEBUG: Original dropbear Makefile content (head):"
-                head -n 20 "$DROPBEAR_MK"
-                
-                echo "Patching dropbear Makefile..."
-                # 1. 移除 autoreconf
+                # 使用 export 传递变量，避免 make 参数解析错误
                 sed -i 's/autoreconf -v;//g' "$DROPBEAR_MK"
-                
-                # 2. 使用增强正则 (-E) 清理所有形式的 CC=$(CC) 参数 (包括空格)
                 sed -i -E 's/CC\s*=\s*\$\(CC\)//g' "$DROPBEAR_MK"
                 sed -i -E 's/CFLAGS\s*=\s*\$\(CFLAGS\)//g' "$DROPBEAR_MK"
                 sed -i -E 's/LDFLAGS\s*=\s*\$\(LDFLAGS\)//g' "$DROPBEAR_MK"
-                
-                # 3. 使用 export 方式传递变量，这是最稳妥的方法
-                # 这样 configure 直接从环境变量读取，完全避开参数解析问题
-                sed -i 's|./configure|export CC="$(CC)"; export CFLAGS="$(CFLAGS)"; export LDFLAGS="$(LDFLAGS)"; export LIBS="-lz -lcrypt"; ./configure|g' "$DROPBEAR_MK"
-                
-                echo "DEBUG: Patched dropbear Makefile content (configured line):"
-                grep "./configure" "$DROPBEAR_MK"
+                # 注意：这里我们注入了 LIBS="-ltirpc" 以解决 RPC 链接问题
+                sed -i 's|./configure|export CC="$(CC)"; export CFLAGS="$(CFLAGS) -I/usr/include/tirpc"; export LDFLAGS="$(LDFLAGS)"; export LIBS="-lz -lcrypt -ltirpc"; ./configure|g' "$DROPBEAR_MK"
             fi
         fi
 
         # =======================================================
-        # 4. 【注入配置】生成完整标准配置
+        # 4. 【生成配置】
         # =======================================================
         cd "$WORK_DIR/trunk/configs/templates"
         
-        echo "Injecting FULL Standard Config for $TARGET_PROFILE..."
-        echo "CONFIG_VENDOR=ralink" > "$TARGET_PROFILE.config"
-        echo "CONFIG_PRODUCT=MT7621" >> "$TARGET_PROFILE.config"
-        echo "CONFIG_LINUXDIR=$KERNEL_DIR_NAME" >> "$TARGET_PROFILE.config"
-        echo "CONFIG_FIRMWARE_PRODUCT_ID=\"NEWIFI3\"" >> "$TARGET_PROFILE.config"
-        echo "CONFIG_FIRMWARE_CPU_MT7621=y" >> "$TARGET_PROFILE.config"
-        echo "CONFIG_FIRMWARE_MEMORY_512M=y" >> "$TARGET_PROFILE.config"
-        echo "CONFIG_FIRMWARE_FLASH_32M=y" >> "$TARGET_PROFILE.config"
-        echo "CONFIG_FIRMWARE_ENABLE_USB=y" >> "$TARGET_PROFILE.config"
-        echo "CONFIG_FIRMWARE_INCLUDE_HTTPS=y" >> "$TARGET_PROFILE.config"
-        echo "CONFIG_FIRMWARE_INCLUDE_SFTP=y" >> "$TARGET_PROFILE.config"
-        echo "CONFIG_FIRMWARE_INCLUDE_DROPBEAR=y" >> "$TARGET_PROFILE.config"
-        echo "CONFIG_FIRMWARE_WIFI2_DRIVER=3.0" >> "$TARGET_PROFILE.config"
-        echo "CONFIG_FIRMWARE_WIFI5_DRIVER=3.0" >> "$TARGET_PROFILE.config"
-        echo "CONFIG_FIRMWARE_ENABLE_IPV6=y" >> "$TARGET_PROFILE.config"
+        # 强制覆盖生成配置
+        echo "Generating config for $TARGET_PROFILE..."
+        cat > "$TARGET_PROFILE.config" <<EOF
+        CONFIG_VENDOR=ralink
+        CONFIG_PRODUCT=MT7621
+        CONFIG_LINUXDIR=$KERNEL_DIR_NAME
+        CONFIG_FIRMWARE_PRODUCT_ID="NEWIFI3"
+        CONFIG_FIRMWARE_CPU_MT7621=y
+        CONFIG_FIRMWARE_MEMORY_512M=y
+        CONFIG_FIRMWARE_FLASH_32M=y
+        CONFIG_FIRMWARE_ENABLE_USB=y
+        CONFIG_FIRMWARE_INCLUDE_HTTPS=y
+        CONFIG_FIRMWARE_INCLUDE_SFTP=y
+        CONFIG_FIRMWARE_INCLUDE_DROPBEAR=y
+        CONFIG_FIRMWARE_WIFI2_DRIVER=3.0
+        CONFIG_FIRMWARE_WIFI5_DRIVER=3.0
+        CONFIG_FIRMWARE_ENABLE_IPV6=y
+        CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=y
+        # 禁用不需要的插件以减少编译错误概率
+        CONFIG_FIRMWARE_INCLUDE_ARIA=n
+        CONFIG_FIRMWARE_INCLUDE_TRANSMISSION=n
+        CONFIG_FIRMWARE_INCLUDE_WGET=n
+        CONFIG_FIRMWARE_INCLUDE_OPENVPN=n
+        CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=n
+        CONFIG_FIRMWARE_INCLUDE_SSSERVER=n
+        CONFIG_FIRMWARE_INCLUDE_TROJAN=n
+        CONFIG_FIRMWARE_INCLUDE_V2RAY=n
+        CONFIG_FIRMWARE_INCLUDE_XRAY=n
+        CONFIG_FIRMWARE_INCLUDE_SOFTETHERVPN_SERVER=n
+        EOF
         
         cd "$WORK_DIR/trunk"
-        TEMPLATE_PATH="configs/templates/$TARGET_PROFILE.config"
 
         # =======================================================
-        # 5. 准备 Toolchain
+        # 5. 准备 Toolchain (智能探测)
         # =======================================================
         echo "Preparing Toolchain..."
         cd "$TOOLCHAIN_DIR"
         sh dl_toolchain.sh
         
-        echo "Setting up symlink for toolchain..."
-        sudo mkdir -p /opt/rt-n56u
-        sudo ln -sf "$TOOLCHAIN_DIR/toolchain-3.4.x" /opt/rt-n56u/toolchain-mipsel
+        # 自动探测目录名
+        DETECTED_NAME=$(find . -maxdepth 1 -type d -name "toolchain-*" | head -n 1 | sed 's|./||')
+        if [ -z "$DETECTED_NAME" ]; then
+            echo "ERROR: Toolchain download failed!"
+            exit 1
+        fi
+        echo "Using toolchain: $DETECTED_NAME"
         
+        sudo mkdir -p /opt/rt-n56u
+        sudo ln -sf "$TOOLCHAIN_DIR/$DETECTED_NAME" /opt/rt-n56u/toolchain-mipsel
         export PATH="/opt/rt-n56u/toolchain-mipsel/bin:$PATH"
         
-        if ! command -v mipsel-linux-uclibc-gcc &> /dev/null; then
-            echo "ERROR: Toolchain setup failed!"
-            exit 1
+        if ! command -v mipsel-linux-uclibc-gcc &> /dev/null && ! command -v mipsel-openwrt-linux-gcc &> /dev/null; then
+             echo "ERROR: Compiler not found in PATH!"
+             exit 1
         fi
 
         # =======================================================
-        # 6. 修改配置
+        # 6. 开始编译 (增强容错)
         # =======================================================
         cd "$WORK_DIR/trunk"
-        echo "Customizing $TEMPLATE_PATH..."
+        cp -f configs/templates/$TARGET_PROFILE.config .config
         
-        sed -i '/CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD/d' "$TEMPLATE_PATH"
-        echo "CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=y" >> "$TEMPLATE_PATH"
-        
-        # 净化插件列表
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_ARIA/d' "$TEMPLATE_PATH"
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION/d' "$TEMPLATE_PATH"
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_WGET/d' "$TEMPLATE_PATH"
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_OPENVPN/d' "$TEMPLATE_PATH"
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS/d' "$TEMPLATE_PATH"
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_TROJAN/d' "$TEMPLATE_PATH"
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_V2RAY/d' "$TEMPLATE_PATH"
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_XRAY/d' "$TEMPLATE_PATH"
-        sed -i '/CONFIG_FIRMWARE_INCLUDE_SOFTETHERVPN/d' "$TEMPLATE_PATH"
-
-        echo "CONFIG_FIRMWARE_INCLUDE_ARIA=n" >> "$TEMPLATE_PATH"
-        echo "CONFIG_FIRMWARE_INCLUDE_TRANSMISSION=n" >> "$TEMPLATE_PATH"
-        echo "CONFIG_FIRMWARE_INCLUDE_WGET=n" >> "$TEMPLATE_PATH"
-        echo "CONFIG_FIRMWARE_INCLUDE_OPENVPN=n" >> "$TEMPLATE_PATH"
-        echo "CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=n" >> "$TEMPLATE_PATH"
-        echo "CONFIG_FIRMWARE_INCLUDE_SSSERVER=n" >> "$TEMPLATE_PATH"
-        echo "CONFIG_FIRMWARE_INCLUDE_TROJAN=n" >> "$TEMPLATE_PATH"
-        echo "CONFIG_FIRMWARE_INCLUDE_V2RAY=n" >> "$TEMPLATE_PATH"
-        echo "CONFIG_FIRMWARE_INCLUDE_XRAY=n" >> "$TEMPLATE_PATH"
-        echo "CONFIG_FIRMWARE_INCLUDE_SOFTETHERVPN_SERVER=n" >> "$TEMPLATE_PATH"
-
-        # =======================================================
-        # 7. 开始编译
-        # =======================================================
-        cp -f "$TEMPLATE_PATH" .config
-        
-        echo "Starting Pre-build (Libs)..."
-        export LC_ALL=C
-        
+        echo "Starting Pre-build..."
         make clean
         
-        # 必须先编译基础库！
-        # 如果这一步失败，直接退出，不要继续 build_firmware
-        fakeroot make libs || exit 1
+        # 构建依赖库 (Libs)
+        # 使用 -j$(nproc) 加速，但如果出错可以尝试单线程调试
+        echo "Building libs..."
+        fakeroot make libs || { echo "Libs build failed. Check logs above."; exit 1; }
         
-        echo "Starting Full Build..."
-        fakeroot ./build_firmware "$TARGET_PROFILE"
+        # 构建固件
+        echo "Building firmware..."
+        fakeroot ./build_firmware "$TARGET_PROFILE" || { echo "Firmware build failed. Check logs above."; exit 1; }
 
-        
     - name: Organize Artifacts
+      id: organize
       run: |
         mkdir -p ./output_firmware
-        cp ${{ github.workspace }}/padavan/trunk/images/*.trx ./output_firmware/
-        echo "FIRMWARE_PATH=./output_firmware" >> $GITHUB_ENV
+        # 使用 find 安全复制
+        if find ${{ github.workspace }}/padavan/trunk/images -name "*.trx" -exec cp {} ./output_firmware/ \; -quit; then
+            echo "FIRMWARE_PATH=./output_firmware" >> $GITHUB_ENV
+            echo "STATUS=success" >> $GITHUB_ENV
+        else
+            echo "No firmware files generated!"
+            echo "STATUS=failure" >> $GITHUB_ENV
+            exit 1
+        fi
 
-    - name: Upload Firmware to Releases
+    - name: Upload Firmware
       uses: softprops/action-gh-release@v1
-      if: success()
+      if: env.STATUS == 'success' && !cancelled()
       with:
         tag_name: v${{ env.DATE }}-newifi3-${{ env.BUILD_VER }}
         name: Newifi3 D2 Padavan ${{ env.BUILD_VER }} (${{ env.DATE }})
         body: |
-          自动构建固件 (Newifi3 D2)
-          - 机型: Newifi3 D2 (NEWIFI3)
-          - 版本: Padavan ${{ env.BUILD_VER }}
+          Newifi3 D2 自动构建 (Ubuntu 22.04 Optimized)
+          - 内核: ${{ env.BUILD_VER }}
           - 编译日期: ${{ env.DATE }}
-          - 插件: 纯净版
-          - 硬件加速: 开启 (Flow Offload)
+          - 修复: GCC 11 Compatibility, RPC Patch
         files: ${{ env.FIRMWARE_PATH }}/*.trx
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
