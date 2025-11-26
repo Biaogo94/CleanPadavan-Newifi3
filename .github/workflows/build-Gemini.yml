@@ -1,4 +1,4 @@
-name: Build Newifi3 D2 (Multi-Version 3.4/4.4)
+name: Build Newifi3 D2 (Fixed 4.4 Config Path)
 
 on:
   workflow_dispatch:
@@ -50,13 +50,11 @@ jobs:
         
         if [[ "$INPUT_VER" == *"4.4"* ]]; then
             echo "Selection: Kernel 4.4 (MeIsReallyBa)"
-            # 4.4 常用稳定源
             REPO_URL="https://github.com/MeIsReallyBa/padavan-4.4.git"
             REPO_BRANCH="main"
             IS_KERNEL_44="true"
         else
             echo "Selection: Kernel 3.4 (Hanwckf)"
-            # 3.4 经典稳定源
             REPO_URL="https://github.com/hanwckf/rt-n56u.git"
             REPO_BRANCH="master"
             IS_KERNEL_44="false"
@@ -79,16 +77,15 @@ jobs:
         echo "Preparing Toolchain..."
         cd $WORK_DIR/toolchain-mipsel
         
-        # 3.4 和 4.4 通常都有这个脚本，但行为可能不同
         if [ -f "dl_toolchain.sh" ]; then
             sh dl_toolchain.sh
         else
             echo "Notice: dl_toolchain.sh not found, assuming toolchain exists."
         fi
         
-        # 强制创建 /opt 路径链接 (这是 Padavan 编译通用的硬性要求)
+        # 强制创建 /opt 路径链接
         sudo mkdir -p /opt/rt-n56u
-        # 注意：4.4 的工具链目录名可能与 3.4 不同，这里做一个通配符链接
+        # 动态查找工具链目录 (4.4 和 3.4 目录名可能不同)
         TC_DIR=$(find $WORK_DIR/toolchain-mipsel -maxdepth 1 -type d -name "toolchain-*" | head -n 1)
         if [ -d "$TC_DIR" ]; then
             sudo ln -sf "$TC_DIR" /opt/rt-n56u/toolchain-mipsel
@@ -105,7 +102,6 @@ jobs:
             echo ">>> Applying 3.4 specific patches (KVR + 22.04 Fixes)..."
             
             # --- 3.1 注入 KVR (仅 3.4) ---
-            echo "Injecting KVR Patches for 3.4..."
             KVR_TEMP="/tmp/padavan_kvr"
             git clone --depth=1 https://github.com/vb1980/Padavan-KVR.git $KVR_TEMP
             
@@ -124,48 +120,67 @@ jobs:
             rm -rf $KVR_TEMP
             
             # --- 3.2 修复 Ubuntu 22.04 编译报错 (仅 3.4) ---
-            # Fix: mksquashfs (xz)
             if [ -d "$WORK_DIR/trunk/tools/mksquashfs_xz" ]; then
                 cd $WORK_DIR/trunk/tools/mksquashfs_xz
                 sed -i 's/$(MAKE) -C $(XZ_DIR)/sed -i "s\/ po \/ \/g" $(XZ_DIR)\/Makefile; $(MAKE) -C $(XZ_DIR)/g' Makefile
             fi
             
-            # Fix: e2fsprogs & Dropbear
-            # (省略部分详细 sed，保留核心防报错逻辑)
             cd $WORK_DIR/trunk/user/dropbear
             sed -i 's|./configure|export CFLAGS="-I/usr/include/tirpc"; export LIBS="-ltirpc"; ./configure|g' Makefile
             
         else
             echo ">>> Kernel 4.4 selected. Skipping 3.4 legacy patches."
-            # 4.4 源码通常已经修复了 22.04 的大部分编译问题
-            # 如果 4.4 也有特定问题，可在此处添加
         fi
 
         # =======================================================
-        # 4. 配置生成 (通用但参数不同)
+        # 4. 配置生成 (关键修复步骤)
         # =======================================================
         cd $WORK_DIR/trunk
         
-        # 查找配置文件，先找大写再找小写
+        # 4.0 智能查找配置文件 (修复 4.4 找不到配置的问题)
+        echo "Searching for config file..."
+        FOUND_CONFIG=""
+        
+        # 优先级列表：
+        # 1. 标准 templates 目录 (3.4)
+        # 2. boards 目录 (4.4 常见)
+        
+        PATH_LIST=(
+            "configs/templates/NEWIFI3.config"
+            "configs/templates/newifi3.config"
+            "configs/boards/NEWIFI3/NEWIFI3.config"
+            "configs/boards/NEWIFI3/board.config"
+        )
+        
+        for p in "${PATH_LIST[@]}"; do
+            if [ -f "$p" ]; then
+                FOUND_CONFIG="$p"
+                echo "✅ Config found at: $p"
+                break
+            fi
+        done
+        
+        if [ -z "$FOUND_CONFIG" ]; then
+            echo "❌ ERROR: Config file not found for NEWIFI3!"
+            echo "Debug info - Listing directories:"
+            ls -R configs/boards || true
+            exit 1
+        fi
+        
+        # 如果是在 boards 目录找到的，必须把它复制到 templates 目录
+        # 这样 build_firmware 脚本才能通过 NEWIFI3 这个名字找到它
+        if [[ "$FOUND_CONFIG" != "configs/templates/NEWIFI3.config" ]]; then
+            echo "Copying $FOUND_CONFIG to configs/templates/NEWIFI3.config ..."
+            cp "$FOUND_CONFIG" "configs/templates/NEWIFI3.config"
+        fi
+        
         TEMPLATE_PATH="configs/templates/NEWIFI3.config"
-        if [ ! -f "$TEMPLATE_PATH" ]; then
-           TEMPLATE_PATH="configs/templates/newifi3.config"
-        fi
-        
-        if [ ! -f "$TEMPLATE_PATH" ]; then
-           echo "ERROR: Config file not found!"
-           exit 1
-        fi
-        
-        echo "Using template: $TEMPLATE_PATH"
 
         # --- 4.1 3.4 版本特定的配置 ---
         if [ "$IS_KERNEL_44" == "false" ]; then
-            # 强制设置驱动版本以匹配 KVR 补丁
             sed -i 's/CONFIG_FIRMWARE_WIFI2_DRIVER=.*$/CONFIG_FIRMWARE_WIFI2_DRIVER=5.0/g' $TEMPLATE_PATH
             sed -i 's/CONFIG_FIRMWARE_WIFI5_DRIVER=.*$/CONFIG_FIRMWARE_WIFI5_DRIVER=3.0/g' $TEMPLATE_PATH
             
-            # 开启 KVR
             if ! grep -q "CONFIG_FIRMWARE_INCLUDE_WIFI_KVR" $TEMPLATE_PATH; then
                 echo "CONFIG_FIRMWARE_INCLUDE_WIFI_KVR=y" >> $TEMPLATE_PATH
             else
@@ -174,7 +189,6 @@ jobs:
         fi
         
         # --- 4.2 通用精简配置 (适用于 3.4 和 4.4) ---
-        # 4.4 固件通常体积较大，精简插件非常重要
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_ARIA=y/CONFIG_FIRMWARE_INCLUDE_ARIA=n/g' $TEMPLATE_PATH
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION=y/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION=n/g' $TEMPLATE_PATH
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_OPENVPN=y/CONFIG_FIRMWARE_INCLUDE_OPENVPN=n/g' $TEMPLATE_PATH
@@ -183,16 +197,21 @@ jobs:
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_V2RAY=y/CONFIG_FIRMWARE_INCLUDE_V2RAY=n/g' $TEMPLATE_PATH
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_TROJAN=y/CONFIG_FIRMWARE_INCLUDE_TROJAN=n/g' $TEMPLATE_PATH
         
-        # 开启 Flow Offload (硬件加速)
+        # 开启 Flow Offload
         sed -i 's/CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=n/CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=y/g' $TEMPLATE_PATH
 
+        # 确保 .config 生成
         cp -f $TEMPLATE_PATH .config
         
         # =======================================================
         # 5. 编译
         # =======================================================
         echo "Starting Build..."
+        
+        # 4.4 有时需要先清理旧的 obj
         make clean
+        
+        # 调用构建脚本
         fakeroot ./build_firmware $TARGET_PROFILE
         
     - name: Organize Artifacts
@@ -212,12 +231,12 @@ jobs:
       uses: softprops/action-gh-release@v1
       if: success()
       with:
-        tag_name: v${{ env.DATE }}-newifi3
-        name: Newifi3 D2 AutoBuild ${{ env.DATE }}
+        tag_name: v${{ env.DATE }}-newifi3-multi
+        name: Newifi3 AutoBuild ${{ env.DATE }}
         body: |
           Newifi3 D2 自动构建 (Ubuntu 22.04)
-          - 内核版本: ${{ env.IS_KERNEL_44 == 'true' && '4.4 (MeIsReallyBa)' || '3.4 (Hanwckf)' }}
-          - KVR 特性: ${{ env.IS_KERNEL_44 == 'true' && 'Native/Unknown' || 'Patched (vb1980)' }}
+          - 内核: ${{ env.IS_KERNEL_44 == 'true' && '4.4 (MeIsReallyBa)' || '3.4 (Hanwckf)' }}
+          - 状态: Build Successful
         files: ${{ env.FIRMWARE_PATH }}/*.trx
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
