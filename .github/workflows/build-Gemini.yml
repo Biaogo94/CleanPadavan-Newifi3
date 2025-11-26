@@ -1,4 +1,4 @@
-name: Build Newifi3 D2 (Hanwckf + KVR + 22.04 Fix)
+name: Build Newifi3 D2 (Smart KVR + 22.04 Fix)
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ on:
         default: '3.4'
         type: choice
         options:
-          - '3.4 (Hanwckf + KVR)'
+          - '3.4 (Hanwckf + Smart KVR)'
 
 permissions:
   contents: write
@@ -43,7 +43,7 @@ jobs:
         WORK_DIR="$GITHUB_WORKSPACE/padavan"
         mkdir -p $WORK_DIR
         
-        # 回归 Hanwckf 源码，结构最稳定
+        # 使用 Hanwckf 源码 (最为稳健)
         REPO_URL="https://github.com/hanwckf/rt-n56u.git"
         REPO_BRANCH="master"
         TARGET_PROFILE="NEWIFI3"
@@ -58,62 +58,79 @@ jobs:
         git clone --depth=1 --branch $REPO_BRANCH $REPO_URL $WORK_DIR
         
         # =======================================================
-        # 3. 准备工具链 (修复路径报错的关键步骤)
+        # 3. 准备工具链 (创建 /opt 软链接，防止路径报错)
         # =======================================================
         echo "Preparing Toolchain..."
         cd $WORK_DIR/toolchain-mipsel
         sh dl_toolchain.sh
         
-        # 【关键修复】创建 /opt 软链接
-        # 很多 Makefile 硬编码了 /opt/rt-n56u，不创建这个会导致编译器找不到
+        # 强制创建 /opt 路径链接
         sudo mkdir -p /opt/rt-n56u
-        # 这里的 source 路径根据实际下载解压后的目录结构调整，通常是 toolchain-3.4.x
         sudo ln -sf "$WORK_DIR/toolchain-mipsel/toolchain-3.4.x" /opt/rt-n56u/toolchain-mipsel
         
-        # 验证链接
-        ls -l /opt/rt-n56u/toolchain-mipsel/bin/mipsel-linux-uclibc-gcc || echo "TOOLCHAIN LINK FAILED"
+        # 验证一下
+        if [ ! -f "/opt/rt-n56u/toolchain-mipsel/bin/mipsel-linux-uclibc-gcc" ]; then
+            echo "ERROR: Toolchain link failed!"
+            exit 1
+        fi
 
         # =======================================================
-        # 4. 注入 KVR 补丁
+        # 4. 【智能注入】KVR 补丁 (Smart Find)
         # =======================================================
         echo "Injecting KVR Patches..."
-        git clone --depth=1 https://github.com/vb1980/Padavan-KVR.git /tmp/padavan_kvr
+        KVR_TEMP="/tmp/padavan_kvr"
+        git clone --depth=1 https://github.com/vb1980/Padavan-KVR.git $KVR_TEMP
         
-        # Hanwckf 源码驱动路径
-        DRIVER_DIR="$WORK_DIR/trunk/user/www/n56u_ribbon_fixed" # 并不是这里，这是UI
-        # 真正的驱动路径在内核目录或 proprietary_driver，但 Hanwckf 通常放在 trunk/proprietary_driver/rt_wifi
-        DRIVER_DIR="$WORK_DIR/trunk/proprietary_driver/rt_wifi"
+        # --- 调试步骤：列出文件结构，方便排错 ---
+        echo "DEBUG: Listing KVR repo content:"
+        ls -R $KVR_TEMP
+        # ------------------------------------
         
-        # 强制替换驱动
-        rm -rf $DRIVER_DIR/mt7603e
-        cp -r /tmp/padavan_kvr/driver/mt7603e_5.0.3.6 $DRIVER_DIR/mt7603e
+        # Hanwckf 源码驱动目标路径
+        DEST_DRIVER_DIR="$WORK_DIR/trunk/proprietary_driver/rt_wifi"
         
-        rm -rf $DRIVER_DIR/mt7612e
-        cp -r /tmp/padavan_kvr/driver/mt7612e_3.0.4.0 $DRIVER_DIR/mt7612e
+        # 智能查找：在下载的仓库里寻找名称包含 mt7603e 的文件夹
+        # find ... -print -quit 会找到第一个匹配项就停止
+        SRC_MT7603=$(find $KVR_TEMP -type d -name "mt7603e*" -print -quit)
+        SRC_MT7612=$(find $KVR_TEMP -type d -name "mt7612e*" -print -quit)
         
-        rm -rf /tmp/padavan_kvr
+        echo "Detected 2.4G Driver Source: $SRC_MT7603"
+        echo "Detected 5G Driver Source: $SRC_MT7612"
+        
+        if [ -n "$SRC_MT7603" ]; then
+            echo "Overwriting MT7603E driver..."
+            rm -rf $DEST_DRIVER_DIR/mt7603e
+            cp -r "$SRC_MT7603" $DEST_DRIVER_DIR/mt7603e
+        else
+            echo "WARNING: Could not find mt7603e in KVR repo! Using default."
+        fi
+        
+        if [ -n "$SRC_MT7612" ]; then
+            echo "Overwriting MT7612E driver..."
+            rm -rf $DEST_DRIVER_DIR/mt7612e
+            cp -r "$SRC_MT7612" $DEST_DRIVER_DIR/mt7612e
+        else
+            echo "WARNING: Could not find mt7612e in KVR repo! Using default."
+        fi
+        
+        rm -rf $KVR_TEMP
 
         # =======================================================
-        # 5. Ubuntu 22.04 兼容性补丁 (三大金刚)
+        # 5. Ubuntu 22.04 兼容性补丁 (防止编译中断)
         # =======================================================
-        echo "Applying Ubuntu 22.04 Fixes..."
         
-        # Fix 1: mksquashfs (xz)
+        # Fix: mksquashfs (xz)
         cd $WORK_DIR/trunk/tools/mksquashfs_xz
         sed -i 's/$(MAKE) -C $(XZ_DIR)/sed -i "s\/ po \/ \/g" $(XZ_DIR)\/Makefile; $(MAKE) -C $(XZ_DIR)/g' Makefile
         
-        # Fix 2: e2fsprogs (configure 语法)
+        # Fix: e2fsprogs (configure 语法错误)
         cd $WORK_DIR/trunk/user/e2fsprogs
         sed -i 's/AM_GNU_GETTEXT(external)/# AM_GNU_GETTEXT(external)/g' configure.in || true
-        # 尝试重新生成 configure
         autoreconf -ivf || true
-        # 强制禁用 NLS
         sed -i 's/.\/configure/.\/configure --disable-nls/g' Makefile
 
-        # Fix 3: Dropbear (RPC) - Hanwckf 源码中 Dropbear 版本较老
+        # Fix: Dropbear (RPC 头文件缺失)
         cd $WORK_DIR/trunk/user/dropbear
-        # 如果 autoreconf 失败，我们尝试直接修改 Makefile 注入 CFLAGS
-        # 先尝试生成 configure
         DB_DIR=$(find . -maxdepth 1 -type d -name "dropbear-*" | head -n 1)
         if [ -d "$DB_DIR" ]; then
            cd "$DB_DIR"
@@ -123,37 +140,48 @@ jobs:
         sed -i 's|./configure|export CFLAGS="-I/usr/include/tirpc"; export LIBS="-ltirpc"; ./configure|g' Makefile
         
         # =======================================================
-        # 6. 配置生成与编译
+        # 6. 配置生成
         # =======================================================
         cd $WORK_DIR/trunk
         TEMPLATE_PATH="configs/templates/NEWIFI3.config"
         
         if [ ! -f "$TEMPLATE_PATH" ]; then
            echo "ERROR: NEWIFI3.config not found!"
-           exit 1
+           # 尝试查找小写
+           TEMPLATE_PATH="configs/templates/newifi3.config"
+           if [ ! -f "$TEMPLATE_PATH" ]; then exit 1; fi
         fi
         
-        # 匹配 KVR 驱动版本 (2.4G=5.0, 5G=3.0)
+        # 强制设置驱动版本以匹配 KVR 补丁 (关键)
         sed -i 's/CONFIG_FIRMWARE_WIFI2_DRIVER=.*$/CONFIG_FIRMWARE_WIFI2_DRIVER=5.0/g' $TEMPLATE_PATH
         sed -i 's/CONFIG_FIRMWARE_WIFI5_DRIVER=.*$/CONFIG_FIRMWARE_WIFI5_DRIVER=3.0/g' $TEMPLATE_PATH
         
-        # 关插件 (精简)
+        # 开启 KVR 宏 (如果源码支持)
+        if ! grep -q "CONFIG_FIRMWARE_INCLUDE_WIFI_KVR" $TEMPLATE_PATH; then
+            echo "CONFIG_FIRMWARE_INCLUDE_WIFI_KVR=y" >> $TEMPLATE_PATH
+        else
+            sed -i 's/CONFIG_FIRMWARE_INCLUDE_WIFI_KVR=n/CONFIG_FIRMWARE_INCLUDE_WIFI_KVR=y/g' $TEMPLATE_PATH
+        fi
+
+        # 精简插件 (防止空间不足或编译其他插件报错)
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_ARIA=y/CONFIG_FIRMWARE_INCLUDE_ARIA=n/g' $TEMPLATE_PATH
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION=y/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION=n/g' $TEMPLATE_PATH
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_OPENVPN=y/CONFIG_FIRMWARE_INCLUDE_OPENVPN=n/g' $TEMPLATE_PATH
+        sed -i 's/CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=y/CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=n/g' $TEMPLATE_PATH
+        sed -i 's/CONFIG_FIRMWARE_INCLUDE_XRAY=y/CONFIG_FIRMWARE_INCLUDE_XRAY=n/g' $TEMPLATE_PATH
+        sed -i 's/CONFIG_FIRMWARE_INCLUDE_V2RAY=y/CONFIG_FIRMWARE_INCLUDE_V2RAY=n/g' $TEMPLATE_PATH
+        sed -i 's/CONFIG_FIRMWARE_INCLUDE_TROJAN=y/CONFIG_FIRMWARE_INCLUDE_TROJAN=n/g' $TEMPLATE_PATH
         
-        # 开硬件加速
+        # 开启 Flow Offload
         sed -i 's/CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=n/CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=y/g' $TEMPLATE_PATH
-        if ! grep -q "CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD" $TEMPLATE_PATH; then
-           echo "CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=y" >> $TEMPLATE_PATH
-        fi
 
         cp -f $TEMPLATE_PATH .config
         
+        # =======================================================
+        # 7. 编译
+        # =======================================================
         echo "Starting Build..."
         make clean
-        
-        # 使用 fakeroot 构建
         fakeroot ./build_firmware $TARGET_PROFILE
         
     - name: Organize Artifacts
@@ -165,7 +193,7 @@ jobs:
            echo "FIRMWARE_PATH=./output_firmware" >> $GITHUB_ENV
            echo "Build Success!"
         else
-           echo "Build Failed."
+           echo "Build Failed. Check logs."
            exit 1
         fi
 
@@ -173,8 +201,13 @@ jobs:
       uses: softprops/action-gh-release@v1
       if: success()
       with:
-        tag_name: v${{ env.DATE }}-newifi3-kvr
-        name: Newifi3 D2 (Hanwckf KVR) ${{ env.DATE }}
+        tag_name: v${{ env.DATE }}-newifi3-kvr-fixed
+        name: Newifi3 D2 (Hanwckf KVR SmartFix) ${{ env.DATE }}
+        body: |
+          Newifi3 D2 自动构建 (Ubuntu 22.04 Fixed)
+          - 源码: Hanwckf
+          - 特性: KVR Roaming (Auto-injected)
+          - 修复: Toolchain Path, RPC, XZ, e2fsprogs
         files: ${{ env.FIRMWARE_PATH }}/*.trx
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
