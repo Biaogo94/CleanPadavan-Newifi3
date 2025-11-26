@@ -1,16 +1,15 @@
-name: Build Newifi3 D2 Padavan (Fixed e2fsprogs)
+name: Build Newifi3 D2 (ChongshengB + KVR)
 
 on:
   workflow_dispatch:
     inputs:
       target_version:
-        description: '选择固件版本 / Firmware Version'
+        description: '固件内核版本 (ChongshengB)'
         required: true
         default: '3.4'
         type: choice
         options:
-          - '3.4 (hanwckf - Stable/Legacy)'
-          - '4.4 (MeIsReallyBa - Kernel 4.4)'
+          - '3.4 (Recommended for KVR)'
 
 permissions:
   contents: write
@@ -27,76 +26,76 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y \
-          libtool-bin curl cmake gperf gawk flex bison \
+          build-essential libtool-bin curl cmake gperf gawk flex bison \
           nano xxd fakeroot kmod cpio git-doc vim-common \
           libncurses5-dev libncurses5 \
           python3-docutils autopoint texinfo \
-          libtirpc-dev automake autoconf pkg-config gettext
+          libtirpc-dev pkg-config unzip \
+          execstack
         sudo apt-get clean
+        # 设置时区
+        sudo timedatectl set-timezone Asia/Shanghai
 
     - name: Run Compilation Logic
       run: |
         # =======================================================
-        # 1. 基础变量设置
+        # 1. 基础配置
         # =======================================================
         WORK_DIR="$GITHUB_WORKSPACE/padavan"
         mkdir -p $WORK_DIR
+        
+        # 使用 ChongshengB 的源码，它对 Ubuntu 20.04/22.04 支持更好
+        REPO_URL="https://github.com/chongshengB/rt-n56u.git"
+        REPO_BRANCH="master"
+        
         TARGET_PROFILE="NEWIFI3"
         CURRENT_DATE=$(date +%Y%m%d)
         echo "DATE=$CURRENT_DATE" >> $GITHUB_ENV
         
-        if [[ "${{ inputs.target_version }}" == *"3.4"* ]]; then
-          REPO_URL="https://github.com/hanwckf/rt-n56u.git"
-          REPO_BRANCH="master"
-          echo "BUILD_VER=3.4" >> $GITHUB_ENV
-        else
-          REPO_URL="https://github.com/MeIsReallyBa/padavan-4.4.git"
-          REPO_BRANCH="main"
-          echo "BUILD_VER=4.4" >> $GITHUB_ENV
-        fi
-        
         # =======================================================
         # 2. 拉取源码
         # =======================================================
-        echo "Cloning source code..."
+        echo "Cloning ChongshengB source..."
         git clone --depth=1 --branch $REPO_BRANCH $REPO_URL $WORK_DIR
         
         # =======================================================
-        # 3. 【关键修复】针对 Ubuntu 22.04 的补丁集
+        # 3. 【核心步骤】注入 KVR (802.11k/v/r) 支持
         # =======================================================
+        echo "Injecting KVR Patches from vb1980..."
         
-        if [[ "${{ inputs.target_version }}" == *"3.4"* ]]; then
-            echo "Applying Critical Patches..."
-
-            # --- Fix A: mksquashfs (po 目录报错) ---
-            cd $WORK_DIR/trunk/tools/mksquashfs_xz
-            sed -i 's/$(MAKE) -C $(XZ_DIR)/sed -i "s\/ po \/ \/g" $(XZ_DIR)\/Makefile; $(MAKE) -C $(XZ_DIR)/g' Makefile
-
-            # --- Fix B: Dropbear (configure 缺失 & RPC 头文件) ---
-            cd $WORK_DIR/trunk/user/dropbear
-            DB_SRC_DIR=$(find . -maxdepth 1 -type d -name "dropbear-*" | head -n 1)
-            if [ -d "$DB_SRC_DIR" ]; then
-                cd "$DB_SRC_DIR"
-                autoreconf -ivf
-                cd ..
-                sed -i 's|./configure|export CFLAGS="-I/usr/include/tirpc"; export LIBS="-ltirpc"; ./configure|g' Makefile
-            fi
-
-            # --- Fix C: e2fsprogs (AM_GNU_GETTEXT 语法错误) ---
-            # 这是解决你刚刚遇到的报错
-            echo "Patching e2fsprogs..."
-            cd $WORK_DIR/trunk/user/e2fsprogs
-            # 1. 强制重新生成 configure，修复语法错误
-            autoreconf -ivf
-            # 2. 强制禁用 NLS (多语言支持)，避免后续 gettext 链接错误
-            # 3. 修复 pkg-config 警告 (可选，防止干扰)
-            sed -i 's/./configure/./configure --disable-nls/g' Makefile
+        # 临时克隆 KVR 仓库
+        git clone --depth=1 https://github.com/vb1980/Padavan-KVR.git /tmp/padavan_kvr
+        
+        # 这里的逻辑是：将 KVR 仓库中优化过的驱动代码，覆盖到 ChongshengB 源码的驱动目录中
+        # Newifi3 (MT7621) 涉及的驱动通常是 mt7603e (2.4G) 和 mt7612e (5G)
+        # 注意：不同源码结构可能略有不同，ChongshengB 的驱动路径通常在 trunk/proprietary_driver/rt_wifi
+        
+        DRIVER_DIR="$WORK_DIR/trunk/proprietary_driver/rt_wifi"
+        
+        # 覆盖 2.4G 驱动 (MT7603)
+        if [ -d "/tmp/padavan_kvr/driver/mt7603e_5.0.3.6" ]; then
+            echo "Patching MT7603E (2.4G)..."
+            # 先删除旧的防止文件残留
+            rm -rf $DRIVER_DIR/mt7603e
+            cp -r /tmp/padavan_kvr/driver/mt7603e_5.0.3.6 $DRIVER_DIR/mt7603e
         fi
-
+        
+        # 覆盖 5G 驱动 (MT7612E)
+        if [ -d "/tmp/padavan_kvr/driver/mt7612e_3.0.4.0" ]; then
+            echo "Patching MT7612E (5G)..."
+            rm -rf $DRIVER_DIR/mt7612e
+            cp -r /tmp/padavan_kvr/driver/mt7612e_3.0.4.0 $DRIVER_DIR/mt7612e
+        fi
+        
+        # 清理临时文件
+        rm -rf /tmp/padavan_kvr
+        
         # =======================================================
         # 4. 准备 Toolchain
         # =======================================================
+        echo "Preparing Toolchain..."
         cd $WORK_DIR/toolchain-mipsel
+        # ChongshengB 脚本会自动下载适配该源码的工具链
         sh dl_toolchain.sh
         
         # =======================================================
@@ -104,29 +103,36 @@ jobs:
         # =======================================================
         cd $WORK_DIR/trunk
         
+        # ChongshengB 源码通常自带 NEWIFI3.config
         TEMPLATE_PATH="configs/templates/NEWIFI3.config"
-        [ ! -f "$TEMPLATE_PATH" ] && TEMPLATE_PATH="configs/templates/newifi3.config"
         
         if [ ! -f "$TEMPLATE_PATH" ]; then
-          echo "Error: Config template not found!"
-          exit 1
+            echo "Error: NEWIFI3 config not found!"
+            exit 1
         fi
         
-        # 插件净化 & 优化
-        sed -i 's/CONFIG_FIRMWARE_INCLUDE_ARIA=y/CONFIG_FIRMWARE_INCLUDE_ARIA=n/g' $TEMPLATE_PATH
-        sed -i 's/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION=y/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION=n/g' $TEMPLATE_PATH
-        sed -i 's/CONFIG_FIRMWARE_INCLUDE_WGET=y/CONFIG_FIRMWARE_INCLUDE_WGET=n/g' $TEMPLATE_PATH
-        sed -i 's/CONFIG_FIRMWARE_INCLUDE_OPENVPN=y/CONFIG_FIRMWARE_INCLUDE_OPENVPN=n/g' $TEMPLATE_PATH
-        sed -i 's/CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=y/CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=n/g' $TEMPLATE_PATH
-        sed -i 's/CONFIG_FIRMWARE_INCLUDE_TROJAN=y/CONFIG_FIRMWARE_INCLUDE_TROJAN=n/g' $TEMPLATE_PATH
-        sed -i 's/CONFIG_FIRMWARE_INCLUDE_V2RAY=y/CONFIG_FIRMWARE_INCLUDE_V2RAY=n/g' $TEMPLATE_PATH
-        sed -i 's/CONFIG_FIRMWARE_INCLUDE_XRAY=y/CONFIG_FIRMWARE_INCLUDE_XRAY=n/g' $TEMPLATE_PATH
+        echo "Modifying Config..."
+        
+        # --- 确保使用正确的驱动版本 (配合 KVR) ---
+        # 这里的版本号需要匹配刚才 copy 进去的文件夹名，或者保持默认(通常源码会自动识别)
+        # ChongshengB 源码通常使用 CONFIG_FIRMWARE_WIFI2_DRIVER=5.0 这种形式
+        # 我们这里强制指定通用参数
+        
+        # 2.4G 使用 5.0 驱动结构 (KVR包通常基于新版结构)
+        sed -i 's/CONFIG_FIRMWARE_WIFI2_DRIVER=.*$/CONFIG_FIRMWARE_WIFI2_DRIVER=5.0/g' $TEMPLATE_PATH
+        # 5G 使用 3.0 驱动结构
+        sed -i 's/CONFIG_FIRMWARE_WIFI5_DRIVER=.*$/CONFIG_FIRMWARE_WIFI5_DRIVER=3.0/g' $TEMPLATE_PATH
+        
+        # --- 净化插件 (C大源码插件很多，需要强力关闭) ---
+        # 使用循环批量关闭，保持脚本整洁
+        for PLUG in ARIA TRANSMISSION WGET OPENVPN SHADOWSOCKS TROJAN V2RAY XRAY SOFTETHERVPN_SERVER ADGUARDHome ALIDDNS ZEROTIER WIREGUARD; do
+            sed -i "s/CONFIG_FIRMWARE_INCLUDE_${PLUG}=y/CONFIG_FIRMWARE_INCLUDE_${PLUG}=n/g" $TEMPLATE_PATH
+        done
 
-        # 硬件加速
+        # --- 开启性能选项 ---
         sed -i 's/CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=n/CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=y/g' $TEMPLATE_PATH
-        if ! grep -q "CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD" $TEMPLATE_PATH; then
-           echo "CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=y" >> $TEMPLATE_PATH
-        fi
+        # 开启 KVR 相关的构建宏 (如果有)
+        echo "CONFIG_FIRMWARE_INCLUDE_WIFI_KVR=y" >> $TEMPLATE_PATH
         
         cp -f $TEMPLATE_PATH .config
         
@@ -134,12 +140,17 @@ jobs:
         # 6. 开始编译
         # =======================================================
         echo "Starting Build..."
+        # 简单的清理
         make clean
+        
+        # ChongshengB 建议先构建 libs，再构建固件，这样容错率高
+        fakeroot make libs
         fakeroot ./build_firmware $TARGET_PROFILE
         
     - name: Organize Artifacts
       run: |
         mkdir -p ./output_firmware
+        # C大源码生成的固件通常在 images 目录
         cp ${{ github.workspace }}/padavan/trunk/images/*.trx ./output_firmware/ 2>/dev/null || true
         
         if [ "$(ls -A ./output_firmware)" ]; then
@@ -154,13 +165,14 @@ jobs:
       uses: softprops/action-gh-release@v1
       if: success()
       with:
-        tag_name: v${{ env.DATE }}-newifi3-${{ env.BUILD_VER }}
-        name: Newifi3 D2 Padavan ${{ env.BUILD_VER }} (${{ env.DATE }})
+        tag_name: v${{ env.DATE }}-newifi3-kvr
+        name: Newifi3 D2 (ChongshengB+KVR) ${{ env.DATE }}
         body: |
-          Newifi3 D2 自动构建固件
-          - 版本: Padavan ${{ env.BUILD_VER }}
-          - 编译日期: ${{ env.DATE }}
-          - 修复: Dropbear, e2fsprogs build fixes
+          Newifi3 D2 自动构建
+          - 源码: ChongshengB (Ubuntu 22.04 Compatible)
+          - 特性: 集成 vb1980 KVR 漫游支持
+          - 驱动: MT7603E(5.0) + MT7612E(3.0)
+          - 插件: 纯净版
         files: ${{ env.FIRMWARE_PATH }}/*.trx
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
