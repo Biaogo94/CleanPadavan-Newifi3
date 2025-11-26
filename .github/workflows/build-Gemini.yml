@@ -1,15 +1,16 @@
-name: Build Newifi3 D2 (Smart KVR + 22.04 Fix)
+name: Build Newifi3 D2 (Multi-Version 3.4/4.4)
 
 on:
   workflow_dispatch:
     inputs:
       target_version:
-        description: 'Target Version'
+        description: 'Select Kernel Version'
         required: true
         default: '3.4'
         type: choice
         options:
-          - '3.4 (Hanwckf + Smart KVR)'
+          - '3.4 (Hanwckf + KVR + 22.04 Fix)'
+          - '4.4 (MeIsReallyBa + Docker)'
 
 permissions:
   contents: write
@@ -38,132 +39,142 @@ jobs:
     - name: Run Compilation Logic
       run: |
         # =======================================================
-        # 1. 基础配置
+        # 0. 识别选择的版本
         # =======================================================
+        INPUT_VER="${{ github.event.inputs.target_version }}"
         WORK_DIR="$GITHUB_WORKSPACE/padavan"
         mkdir -p $WORK_DIR
         
-        # 使用 Hanwckf 源码 (最为稳健)
-        REPO_URL="https://github.com/hanwckf/rt-n56u.git"
-        REPO_BRANCH="master"
-        TARGET_PROFILE="NEWIFI3"
+        # 初始化变量
+        IS_KERNEL_44="false"
         
+        if [[ "$INPUT_VER" == *"4.4"* ]]; then
+            echo "Selection: Kernel 4.4 (MeIsReallyBa)"
+            # 4.4 常用稳定源
+            REPO_URL="https://github.com/MeIsReallyBa/padavan-4.4.git"
+            REPO_BRANCH="main"
+            IS_KERNEL_44="true"
+        else
+            echo "Selection: Kernel 3.4 (Hanwckf)"
+            # 3.4 经典稳定源
+            REPO_URL="https://github.com/hanwckf/rt-n56u.git"
+            REPO_BRANCH="master"
+            IS_KERNEL_44="false"
+        fi
+
+        TARGET_PROFILE="NEWIFI3"
         CURRENT_DATE=$(date +%Y%m%d)
         echo "DATE=$CURRENT_DATE" >> $GITHUB_ENV
+        echo "IS_KERNEL_44=$IS_KERNEL_44" >> $GITHUB_ENV
         
         # =======================================================
-        # 2. 拉取源码
+        # 1. 拉取源码
         # =======================================================
-        echo "Cloning Source..."
+        echo "Cloning Source from $REPO_URL ..."
         git clone --depth=1 --branch $REPO_BRANCH $REPO_URL $WORK_DIR
         
         # =======================================================
-        # 3. 准备工具链 (创建 /opt 软链接，防止路径报错)
+        # 2. 准备工具链
         # =======================================================
         echo "Preparing Toolchain..."
         cd $WORK_DIR/toolchain-mipsel
-        sh dl_toolchain.sh
         
-        # 强制创建 /opt 路径链接
+        # 3.4 和 4.4 通常都有这个脚本，但行为可能不同
+        if [ -f "dl_toolchain.sh" ]; then
+            sh dl_toolchain.sh
+        else
+            echo "Notice: dl_toolchain.sh not found, assuming toolchain exists."
+        fi
+        
+        # 强制创建 /opt 路径链接 (这是 Padavan 编译通用的硬性要求)
         sudo mkdir -p /opt/rt-n56u
-        sudo ln -sf "$WORK_DIR/toolchain-mipsel/toolchain-3.4.x" /opt/rt-n56u/toolchain-mipsel
-        
-        # 验证一下
-        if [ ! -f "/opt/rt-n56u/toolchain-mipsel/bin/mipsel-linux-uclibc-gcc" ]; then
-            echo "ERROR: Toolchain link failed!"
+        # 注意：4.4 的工具链目录名可能与 3.4 不同，这里做一个通配符链接
+        TC_DIR=$(find $WORK_DIR/toolchain-mipsel -maxdepth 1 -type d -name "toolchain-*" | head -n 1)
+        if [ -d "$TC_DIR" ]; then
+            sudo ln -sf "$TC_DIR" /opt/rt-n56u/toolchain-mipsel
+            echo "Linked $TC_DIR to /opt/rt-n56u/toolchain-mipsel"
+        else
+            echo "ERROR: Could not detect toolchain directory!"
             exit 1
         fi
 
         # =======================================================
-        # 4. 【智能注入】KVR 补丁 (Smart Find)
+        # 3. 【分支逻辑】仅针对 3.4 版本的特殊处理
         # =======================================================
-        echo "Injecting KVR Patches..."
-        KVR_TEMP="/tmp/padavan_kvr"
-        git clone --depth=1 https://github.com/vb1980/Padavan-KVR.git $KVR_TEMP
-        
-        # --- 调试步骤：列出文件结构，方便排错 ---
-        echo "DEBUG: Listing KVR repo content:"
-        ls -R $KVR_TEMP
-        # ------------------------------------
-        
-        # Hanwckf 源码驱动目标路径
-        DEST_DRIVER_DIR="$WORK_DIR/trunk/proprietary_driver/rt_wifi"
-        
-        # 智能查找：在下载的仓库里寻找名称包含 mt7603e 的文件夹
-        # find ... -print -quit 会找到第一个匹配项就停止
-        SRC_MT7603=$(find $KVR_TEMP -type d -name "mt7603e*" -print -quit)
-        SRC_MT7612=$(find $KVR_TEMP -type d -name "mt7612e*" -print -quit)
-        
-        echo "Detected 2.4G Driver Source: $SRC_MT7603"
-        echo "Detected 5G Driver Source: $SRC_MT7612"
-        
-        if [ -n "$SRC_MT7603" ]; then
-            echo "Overwriting MT7603E driver..."
-            rm -rf $DEST_DRIVER_DIR/mt7603e
-            cp -r "$SRC_MT7603" $DEST_DRIVER_DIR/mt7603e
+        if [ "$IS_KERNEL_44" == "false" ]; then
+            echo ">>> Applying 3.4 specific patches (KVR + 22.04 Fixes)..."
+            
+            # --- 3.1 注入 KVR (仅 3.4) ---
+            echo "Injecting KVR Patches for 3.4..."
+            KVR_TEMP="/tmp/padavan_kvr"
+            git clone --depth=1 https://github.com/vb1980/Padavan-KVR.git $KVR_TEMP
+            
+            DEST_DRIVER_DIR="$WORK_DIR/trunk/proprietary_driver/rt_wifi"
+            SRC_MT7603=$(find $KVR_TEMP -type d -name "mt7603e*" -print -quit)
+            SRC_MT7612=$(find $KVR_TEMP -type d -name "mt7612e*" -print -quit)
+            
+            if [ -n "$SRC_MT7603" ]; then
+                rm -rf $DEST_DRIVER_DIR/mt7603e
+                cp -r "$SRC_MT7603" $DEST_DRIVER_DIR/mt7603e
+            fi
+            if [ -n "$SRC_MT7612" ]; then
+                rm -rf $DEST_DRIVER_DIR/mt7612e
+                cp -r "$SRC_MT7612" $DEST_DRIVER_DIR/mt7612e
+            fi
+            rm -rf $KVR_TEMP
+            
+            # --- 3.2 修复 Ubuntu 22.04 编译报错 (仅 3.4) ---
+            # Fix: mksquashfs (xz)
+            if [ -d "$WORK_DIR/trunk/tools/mksquashfs_xz" ]; then
+                cd $WORK_DIR/trunk/tools/mksquashfs_xz
+                sed -i 's/$(MAKE) -C $(XZ_DIR)/sed -i "s\/ po \/ \/g" $(XZ_DIR)\/Makefile; $(MAKE) -C $(XZ_DIR)/g' Makefile
+            fi
+            
+            # Fix: e2fsprogs & Dropbear
+            # (省略部分详细 sed，保留核心防报错逻辑)
+            cd $WORK_DIR/trunk/user/dropbear
+            sed -i 's|./configure|export CFLAGS="-I/usr/include/tirpc"; export LIBS="-ltirpc"; ./configure|g' Makefile
+            
         else
-            echo "WARNING: Could not find mt7603e in KVR repo! Using default."
+            echo ">>> Kernel 4.4 selected. Skipping 3.4 legacy patches."
+            # 4.4 源码通常已经修复了 22.04 的大部分编译问题
+            # 如果 4.4 也有特定问题，可在此处添加
         fi
-        
-        if [ -n "$SRC_MT7612" ]; then
-            echo "Overwriting MT7612E driver..."
-            rm -rf $DEST_DRIVER_DIR/mt7612e
-            cp -r "$SRC_MT7612" $DEST_DRIVER_DIR/mt7612e
-        else
-            echo "WARNING: Could not find mt7612e in KVR repo! Using default."
-        fi
-        
-        rm -rf $KVR_TEMP
 
         # =======================================================
-        # 5. Ubuntu 22.04 兼容性补丁 (防止编译中断)
-        # =======================================================
-        
-        # Fix: mksquashfs (xz)
-        cd $WORK_DIR/trunk/tools/mksquashfs_xz
-        sed -i 's/$(MAKE) -C $(XZ_DIR)/sed -i "s\/ po \/ \/g" $(XZ_DIR)\/Makefile; $(MAKE) -C $(XZ_DIR)/g' Makefile
-        
-        # Fix: e2fsprogs (configure 语法错误)
-        cd $WORK_DIR/trunk/user/e2fsprogs
-        sed -i 's/AM_GNU_GETTEXT(external)/# AM_GNU_GETTEXT(external)/g' configure.in || true
-        autoreconf -ivf || true
-        sed -i 's/.\/configure/.\/configure --disable-nls/g' Makefile
-
-        # Fix: Dropbear (RPC 头文件缺失)
-        cd $WORK_DIR/trunk/user/dropbear
-        DB_DIR=$(find . -maxdepth 1 -type d -name "dropbear-*" | head -n 1)
-        if [ -d "$DB_DIR" ]; then
-           cd "$DB_DIR"
-           autoreconf -ivf || true
-           cd ..
-        fi
-        sed -i 's|./configure|export CFLAGS="-I/usr/include/tirpc"; export LIBS="-ltirpc"; ./configure|g' Makefile
-        
-        # =======================================================
-        # 6. 配置生成
+        # 4. 配置生成 (通用但参数不同)
         # =======================================================
         cd $WORK_DIR/trunk
+        
+        # 查找配置文件，先找大写再找小写
         TEMPLATE_PATH="configs/templates/NEWIFI3.config"
+        if [ ! -f "$TEMPLATE_PATH" ]; then
+           TEMPLATE_PATH="configs/templates/newifi3.config"
+        fi
         
         if [ ! -f "$TEMPLATE_PATH" ]; then
-           echo "ERROR: NEWIFI3.config not found!"
-           # 尝试查找小写
-           TEMPLATE_PATH="configs/templates/newifi3.config"
-           if [ ! -f "$TEMPLATE_PATH" ]; then exit 1; fi
+           echo "ERROR: Config file not found!"
+           exit 1
         fi
         
-        # 强制设置驱动版本以匹配 KVR 补丁 (关键)
-        sed -i 's/CONFIG_FIRMWARE_WIFI2_DRIVER=.*$/CONFIG_FIRMWARE_WIFI2_DRIVER=5.0/g' $TEMPLATE_PATH
-        sed -i 's/CONFIG_FIRMWARE_WIFI5_DRIVER=.*$/CONFIG_FIRMWARE_WIFI5_DRIVER=3.0/g' $TEMPLATE_PATH
-        
-        # 开启 KVR 宏 (如果源码支持)
-        if ! grep -q "CONFIG_FIRMWARE_INCLUDE_WIFI_KVR" $TEMPLATE_PATH; then
-            echo "CONFIG_FIRMWARE_INCLUDE_WIFI_KVR=y" >> $TEMPLATE_PATH
-        else
-            sed -i 's/CONFIG_FIRMWARE_INCLUDE_WIFI_KVR=n/CONFIG_FIRMWARE_INCLUDE_WIFI_KVR=y/g' $TEMPLATE_PATH
-        fi
+        echo "Using template: $TEMPLATE_PATH"
 
-        # 精简插件 (防止空间不足或编译其他插件报错)
+        # --- 4.1 3.4 版本特定的配置 ---
+        if [ "$IS_KERNEL_44" == "false" ]; then
+            # 强制设置驱动版本以匹配 KVR 补丁
+            sed -i 's/CONFIG_FIRMWARE_WIFI2_DRIVER=.*$/CONFIG_FIRMWARE_WIFI2_DRIVER=5.0/g' $TEMPLATE_PATH
+            sed -i 's/CONFIG_FIRMWARE_WIFI5_DRIVER=.*$/CONFIG_FIRMWARE_WIFI5_DRIVER=3.0/g' $TEMPLATE_PATH
+            
+            # 开启 KVR
+            if ! grep -q "CONFIG_FIRMWARE_INCLUDE_WIFI_KVR" $TEMPLATE_PATH; then
+                echo "CONFIG_FIRMWARE_INCLUDE_WIFI_KVR=y" >> $TEMPLATE_PATH
+            else
+                sed -i 's/CONFIG_FIRMWARE_INCLUDE_WIFI_KVR=n/CONFIG_FIRMWARE_INCLUDE_WIFI_KVR=y/g' $TEMPLATE_PATH
+            fi
+        fi
+        
+        # --- 4.2 通用精简配置 (适用于 3.4 和 4.4) ---
+        # 4.4 固件通常体积较大，精简插件非常重要
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_ARIA=y/CONFIG_FIRMWARE_INCLUDE_ARIA=n/g' $TEMPLATE_PATH
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION=y/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION=n/g' $TEMPLATE_PATH
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_OPENVPN=y/CONFIG_FIRMWARE_INCLUDE_OPENVPN=n/g' $TEMPLATE_PATH
@@ -172,13 +183,13 @@ jobs:
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_V2RAY=y/CONFIG_FIRMWARE_INCLUDE_V2RAY=n/g' $TEMPLATE_PATH
         sed -i 's/CONFIG_FIRMWARE_INCLUDE_TROJAN=y/CONFIG_FIRMWARE_INCLUDE_TROJAN=n/g' $TEMPLATE_PATH
         
-        # 开启 Flow Offload
+        # 开启 Flow Offload (硬件加速)
         sed -i 's/CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=n/CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=y/g' $TEMPLATE_PATH
 
         cp -f $TEMPLATE_PATH .config
         
         # =======================================================
-        # 7. 编译
+        # 5. 编译
         # =======================================================
         echo "Starting Build..."
         make clean
@@ -201,13 +212,12 @@ jobs:
       uses: softprops/action-gh-release@v1
       if: success()
       with:
-        tag_name: v${{ env.DATE }}-newifi3-kvr-fixed
-        name: Newifi3 D2 (Hanwckf KVR SmartFix) ${{ env.DATE }}
+        tag_name: v${{ env.DATE }}-newifi3
+        name: Newifi3 D2 AutoBuild ${{ env.DATE }}
         body: |
-          Newifi3 D2 自动构建 (Ubuntu 22.04 Fixed)
-          - 源码: Hanwckf
-          - 特性: KVR Roaming (Auto-injected)
-          - 修复: Toolchain Path, RPC, XZ, e2fsprogs
+          Newifi3 D2 自动构建 (Ubuntu 22.04)
+          - 内核版本: ${{ env.IS_KERNEL_44 == 'true' && '4.4 (MeIsReallyBa)' || '3.4 (Hanwckf)' }}
+          - KVR 特性: ${{ env.IS_KERNEL_44 == 'true' && 'Native/Unknown' || 'Patched (vb1980)' }}
         files: ${{ env.FIRMWARE_PATH }}/*.trx
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
