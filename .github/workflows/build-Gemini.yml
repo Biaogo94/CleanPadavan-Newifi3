@@ -1,4 +1,4 @@
-name: Build Newifi3 D2 (Fixed 4.4 Structure)
+name: Build Newifi3 D2 (Final Fix)
 
 on:
   workflow_dispatch:
@@ -39,30 +39,35 @@ jobs:
     - name: Run Compilation Logic
       run: |
         # =======================================================
-        # 0. 识别选择的版本
+        # 0. 初始化变量与环境
         # =======================================================
         INPUT_VER="${{ github.event.inputs.target_version }}"
         WORK_DIR="$GITHUB_WORKSPACE/padavan"
         mkdir -p $WORK_DIR
         
         IS_KERNEL_44="false"
+        TARGET_PROFILE=""
         
         if [[ "$INPUT_VER" == *"4.4"* ]]; then
             echo "Selection: Kernel 4.4 (MeIsReallyBa)"
             REPO_URL="https://github.com/MeIsReallyBa/padavan-4.4.git"
             REPO_BRANCH="main"
             IS_KERNEL_44="true"
+            # 4.4 源码中，新三的名字通常是 NEWIFI
+            TARGET_PROFILE="NEWIFI" 
         else
             echo "Selection: Kernel 3.4 (Hanwckf)"
             REPO_URL="https://github.com/hanwckf/rt-n56u.git"
             REPO_BRANCH="master"
             IS_KERNEL_44="false"
+            # 3.4 源码中，新三的名字通常是 NEWIFI3
+            TARGET_PROFILE="NEWIFI3"
         fi
 
-        TARGET_PROFILE="NEWIFI3"
         CURRENT_DATE=$(date +%Y%m%d)
         echo "DATE=$CURRENT_DATE" >> $GITHUB_ENV
         echo "IS_KERNEL_44=$IS_KERNEL_44" >> $GITHUB_ENV
+        echo "TARGET_PROFILE=$TARGET_PROFILE" >> $GITHUB_ENV
         
         # =======================================================
         # 1. 拉取源码
@@ -81,6 +86,7 @@ jobs:
         fi
         
         sudo mkdir -p /opt/rt-n56u
+        # 动态查找工具链目录，兼容不同命名
         TC_DIR=$(find $WORK_DIR/toolchain-mipsel -maxdepth 1 -type d -name "toolchain-*" | head -n 1)
         if [ -d "$TC_DIR" ]; then
             sudo ln -sf "$TC_DIR" /opt/rt-n56u/toolchain-mipsel
@@ -91,117 +97,96 @@ jobs:
         fi
 
         # =======================================================
-        # 3. 3.4 版本专属修补 (KVR + Ubuntu Fix)
+        # 3. 分支处理逻辑
         # =======================================================
-        if [ "$IS_KERNEL_44" == "false" ]; then
-            echo ">>> Applying 3.4 specific patches..."
+        
+        cd $WORK_DIR/trunk
+        
+        if [ "$IS_KERNEL_44" == "true" ]; then
+            # ---------------------------------------------------
+            # 3.A: 4.4 版本处理 (修改 board.mk)
+            # ---------------------------------------------------
+            echo ">>> Configuring for Kernel 4.4 (Profile: $TARGET_PROFILE)..."
             
-            # KVR 注入
+            # 4.4 的配置通常在 configs/boards/NEWIFI/board.mk
+            CONFIG_FILE="configs/boards/$TARGET_PROFILE/board.mk"
+            
+            if [ ! -f "$CONFIG_FILE" ]; then
+                echo "ERROR: Could not find config file: $CONFIG_FILE"
+                echo "Available boards:"
+                ls configs/boards
+                exit 1
+            fi
+            
+            echo "Modifying $CONFIG_FILE ..."
+            # 4.4 精简插件
+            sed -i 's/CONFIG_FIRMWARE_INCLUDE_ARIA=y/CONFIG_FIRMWARE_INCLUDE_ARIA=n/g' $CONFIG_FILE
+            sed -i 's/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION=y/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION=n/g' $CONFIG_FILE
+            sed -i 's/CONFIG_FIRMWARE_INCLUDE_OPENVPN=y/CONFIG_FIRMWARE_INCLUDE_OPENVPN=n/g' $CONFIG_FILE
+            sed -i 's/CONFIG_FIRMWARE_INCLUDE_SMARTDNS=y/CONFIG_FIRMWARE_INCLUDE_SMARTDNS=n/g' $CONFIG_FILE
+            sed -i 's/CONFIG_FIRMWARE_INCLUDE_TROJAN=y/CONFIG_FIRMWARE_INCLUDE_TROJAN=n/g' $CONFIG_FILE
+            # 开启 Flow Offload
+            sed -i 's/CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=n/CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=y/g' $CONFIG_FILE
+            
+            # 注意：4.4 不需要手动 cp 到 .config，build_firmware 脚本会读取 board.mk 自动生成
+            
+        else
+            # ---------------------------------------------------
+            # 3.B: 3.4 版本处理 (KVR + Fix + .config)
+            # ---------------------------------------------------
+            echo ">>> Configuring for Kernel 3.4 (Profile: $TARGET_PROFILE)..."
+            
+            # === 3.4 KVR 注入 ===
             KVR_TEMP="/tmp/padavan_kvr"
             git clone --depth=1 https://github.com/vb1980/Padavan-KVR.git $KVR_TEMP
             DEST_DRIVER_DIR="$WORK_DIR/trunk/proprietary_driver/rt_wifi"
             SRC_MT7603=$(find $KVR_TEMP -type d -name "mt7603e*" -print -quit)
             SRC_MT7612=$(find $KVR_TEMP -type d -name "mt7612e*" -print -quit)
             
-            if [ -n "$SRC_MT7603" ]; then
-                rm -rf $DEST_DRIVER_DIR/mt7603e
-                cp -r "$SRC_MT7603" $DEST_DRIVER_DIR/mt7603e
-            fi
-            if [ -n "$SRC_MT7612" ]; then
-                rm -rf $DEST_DRIVER_DIR/mt7612e
-                cp -r "$SRC_MT7612" $DEST_DRIVER_DIR/mt7612e
-            fi
+            if [ -n "$SRC_MT7603" ]; then rm -rf $DEST_DRIVER_DIR/mt7603e; cp -r "$SRC_MT7603" $DEST_DRIVER_DIR/mt7603e; fi
+            if [ -n "$SRC_MT7612" ]; then rm -rf $DEST_DRIVER_DIR/mt7612e; cp -r "$SRC_MT7612" $DEST_DRIVER_DIR/mt7612e; fi
             rm -rf $KVR_TEMP
             
-            # 22.04 编译报错修复
+            # === 3.4 编译环境修复 ===
             if [ -d "$WORK_DIR/trunk/tools/mksquashfs_xz" ]; then
                 cd $WORK_DIR/trunk/tools/mksquashfs_xz
                 sed -i 's/$(MAKE) -C $(XZ_DIR)/sed -i "s\/ po \/ \/g" $(XZ_DIR)\/Makefile; $(MAKE) -C $(XZ_DIR)/g' Makefile
+                cd $WORK_DIR/trunk
             fi
             cd $WORK_DIR/trunk/user/dropbear
             sed -i 's|./configure|export CFLAGS="-I/usr/include/tirpc"; export LIBS="-ltirpc"; ./configure|g' Makefile
-        fi
-
-        # =======================================================
-        # 4. 关键修正：配置路径适配
-        # =======================================================
-        cd $WORK_DIR/trunk
-        
-        TEMPLATE_PATH=""
-        
-        if [ "$IS_KERNEL_44" == "true" ]; then
-            # --- 4.4 版本逻辑 ---
-            echo "Configuring for Kernel 4.4..."
+            cd $WORK_DIR/trunk
             
-            # 检测是否存在 NEWIFI 目录 (MeIsReallyBa 的命名习惯)
-            if [ -d "configs/boards/NEWIFI" ]; then
-                echo "Found 'NEWIFI' board config. Copying to 'NEWIFI3'..."
-                cp -r configs/boards/NEWIFI configs/boards/NEWIFI3
-            else
-                echo "ERROR: Could not find configs/boards/NEWIFI in 4.4 source!"
-                ls configs/boards
-                exit 1
-            fi
+            # === 3.4 配置文件处理 ===
+            # 3.4 必须手动把模板复制为 .config
+            TEMPLATE_PATH="configs/templates/NEWIFI3.config"
+            if [ ! -f "$TEMPLATE_PATH" ]; then TEMPLATE_PATH="configs/templates/newifi3.config"; fi
             
-            # 4.4 的插件开关通常在 board.mk 文件中
-            TEMPLATE_PATH="configs/boards/NEWIFI3/board.mk"
-            
-        else
-            # --- 3.4 版本逻辑 ---
-            echo "Configuring for Kernel 3.4..."
-            
-            # 3.4 通常在 templates 下
-            if [ -f "configs/templates/NEWIFI3.config" ]; then
-                TEMPLATE_PATH="configs/templates/NEWIFI3.config"
-            elif [ -f "configs/templates/newifi3.config" ]; then
-                TEMPLATE_PATH="configs/templates/newifi3.config"
-            else
-                echo "ERROR: Config not found for 3.4!"
-                exit 1
-            fi
-            
-            # 3.4 驱动版本修正
-            sed -i 's/CONFIG_FIRMWARE_WIFI2_DRIVER=.*$/CONFIG_FIRMWARE_WIFI2_DRIVER=5.0/g' $TEMPLATE_PATH
-            sed -i 's/CONFIG_FIRMWARE_WIFI5_DRIVER=.*$/CONFIG_FIRMWARE_WIFI5_DRIVER=3.0/g' $TEMPLATE_PATH
-            
-            # 3.4 开启 KVR
-            if ! grep -q "CONFIG_FIRMWARE_INCLUDE_WIFI_KVR" $TEMPLATE_PATH; then
-                echo "CONFIG_FIRMWARE_INCLUDE_WIFI_KVR=y" >> $TEMPLATE_PATH
-            else
-                sed -i 's/CONFIG_FIRMWARE_INCLUDE_WIFI_KVR=n/CONFIG_FIRMWARE_INCLUDE_WIFI_KVR=y/g' $TEMPLATE_PATH
-            fi
-        fi
-
-        echo "Modifying config file: $TEMPLATE_PATH"
-
-        # =======================================================
-        # 5. 通用配置修改 (精简插件 + 硬件加速)
-        # =======================================================
-        
-        # 关闭常见插件 (减少体积)
-        sed -i 's/CONFIG_FIRMWARE_INCLUDE_ARIA=y/CONFIG_FIRMWARE_INCLUDE_ARIA=n/g' $TEMPLATE_PATH
-        sed -i 's/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION=y/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION=n/g' $TEMPLATE_PATH
-        sed -i 's/CONFIG_FIRMWARE_INCLUDE_OPENVPN=y/CONFIG_FIRMWARE_INCLUDE_OPENVPN=n/g' $TEMPLATE_PATH
-        sed -i 's/CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=y/CONFIG_FIRMWARE_INCLUDE_SHADOWSOCKS=n/g' $TEMPLATE_PATH
-        sed -i 's/CONFIG_FIRMWARE_INCLUDE_XRAY=y/CONFIG_FIRMWARE_INCLUDE_XRAY=n/g' $TEMPLATE_PATH
-        sed -i 's/CONFIG_FIRMWARE_INCLUDE_V2RAY=y/CONFIG_FIRMWARE_INCLUDE_V2RAY=n/g' $TEMPLATE_PATH
-        sed -i 's/CONFIG_FIRMWARE_INCLUDE_TROJAN=y/CONFIG_FIRMWARE_INCLUDE_TROJAN=n/g' $TEMPLATE_PATH
-        
-        # 开启 Flow Offload (硬件加速)
-        sed -i 's/CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=n/CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=y/g' $TEMPLATE_PATH
-
-        # 对于 3.4 版本，需要手动生成 .config；4.4 版本 build_firmware 会自己处理
-        if [ "$IS_KERNEL_44" == "false" ]; then
             cp -f $TEMPLATE_PATH .config
+            
+            # 修改 .config
+            sed -i 's/CONFIG_FIRMWARE_WIFI2_DRIVER=.*$/CONFIG_FIRMWARE_WIFI2_DRIVER=5.0/g' .config
+            sed -i 's/CONFIG_FIRMWARE_WIFI5_DRIVER=.*$/CONFIG_FIRMWARE_WIFI5_DRIVER=3.0/g' .config
+            if ! grep -q "CONFIG_FIRMWARE_INCLUDE_WIFI_KVR" .config; then
+                echo "CONFIG_FIRMWARE_INCLUDE_WIFI_KVR=y" >> .config
+            else
+                sed -i 's/CONFIG_FIRMWARE_INCLUDE_WIFI_KVR=n/CONFIG_FIRMWARE_INCLUDE_WIFI_KVR=y/g' .config
+            fi
+            
+            # 3.4 精简
+            sed -i 's/CONFIG_FIRMWARE_INCLUDE_ARIA=y/CONFIG_FIRMWARE_INCLUDE_ARIA=n/g' .config
+            sed -i 's/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION=y/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION=n/g' .config
+            sed -i 's/CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=n/CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=y/g' .config
         fi
-        
+
         # =======================================================
-        # 6. 开始编译
+        # 4. 开始编译
         # =======================================================
-        echo "Starting Build..."
-        make clean
+        echo "Starting Build for $TARGET_PROFILE..."
         
-        # 4.4 的编译可能会因为并行数太高在 GitHub Actions 内存不足而失败，使用 fakeroot 运行
+        # ！！！关键修正：不要在这里运行 make clean ！！！
+        # ！！！ build_firmware 脚本会自动处理依赖 ！！！
+        
         fakeroot ./build_firmware $TARGET_PROFILE
         
     - name: Organize Artifacts
@@ -221,12 +206,12 @@ jobs:
       uses: softprops/action-gh-release@v1
       if: success()
       with:
-        tag_name: v${{ env.DATE }}-newifi3-auto
+        tag_name: v${{ env.DATE }}-newifi3-final
         name: Newifi3 AutoBuild ${{ env.DATE }}
         body: |
           Newifi3 D2 自动构建 (Ubuntu 22.04)
           - 内核: ${{ env.IS_KERNEL_44 == 'true' && '4.4 (MeIsReallyBa)' || '3.4 (Hanwckf)' }}
-          - 状态: Build Successful
+          - 机型代码: ${{ env.TARGET_PROFILE }}
         files: ${{ env.FIRMWARE_PATH }}/*.trx
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
