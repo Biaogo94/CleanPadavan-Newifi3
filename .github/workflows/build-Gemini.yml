@@ -37,21 +37,35 @@ jobs:
     - name: Initialize Environment Variables
       id: init
       run: |
-        # 根据输入判断内核版本，设置相应的环境变量
+        # 修正：确保每一行变量赋值都写入 $GITHUB_ENV
         if [[ "${{ github.event.inputs.target_version }}" == *"4.4"* ]]; then
           echo "KERNEL_VER=4.4" >> $GITHUB_ENV
-          echo "REPO_URL=https://github.com/MeIsReallyBa/padavan-4.4.git"
-          echo "REPO_BRANCH=main"
-          echo "TARGET_PROFILE=NEWIFI"
+          echo "REPO_URL=https://github.com/MeIsReallyBa/padavan-4.4.git" >> $GITHUB_ENV
+          echo "REPO_BRANCH=main" >> $GITHUB_ENV
+          echo "TARGET_PROFILE=NEWIFI" >> $GITHUB_ENV
         else
           echo "KERNEL_VER=3.4" >> $GITHUB_ENV
-          echo "REPO_URL=https://github.com/hanwckf/rt-n56u.git"
-          echo "REPO_BRANCH=master"
-          echo "TARGET_PROFILE=NEWIFI3"
+          echo "REPO_URL=https://github.com/hanwckf/rt-n56u.git" >> $GITHUB_ENV
+          echo "REPO_BRANCH=master" >> $GITHUB_ENV
+          echo "TARGET_PROFILE=NEWIFI3" >> $GITHUB_ENV
         fi
         
         echo "BUILD_DATE=$(date +%Y%m%d)" >> $GITHUB_ENV
         echo "WORK_DIR=${{ github.workspace }}/padavan" >> $GITHUB_ENV
+
+    # 建议增加这一步用于调试，防止未来出现类似空变量问题
+    - name: Check Environment Variables
+      run: |
+        echo "Checking variables before cloning..."
+        echo "KERNEL_VER: ${{ env.KERNEL_VER }}"
+        echo "REPO_URL: ${{ env.REPO_URL }}"
+        echo "REPO_BRANCH: ${{ env.REPO_BRANCH }}"
+        echo "WORK_DIR: ${{ env.WORK_DIR }}"
+        
+        if [ -z "${{ env.REPO_URL }}" ]; then
+          echo "Error: REPO_URL is empty!"
+          exit 1
+        fi
 
     - name: Clone Source Code
       run: |
