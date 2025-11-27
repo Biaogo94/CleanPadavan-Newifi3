@@ -106,31 +106,34 @@ jobs:
         echo "Applying KVR patches..."
         git clone --depth=1 https://github.com/vb1980/Padavan-KVR.git /tmp/kvr
         
-        # 定义目标驱动目录
         DRIVER_DIR="trunk/proprietary_driver/rt_wifi"
         
-        # [核心修复] 使用 find 查找目录，不再依赖脆弱的通配符
-        # 查找 mt7603e
-        SRC_7603=$(find /tmp/kvr -type d -name "mt7603e" | head -n 1)
+        # [关键修正] 恢复通配符 *，并对应原脚本逻辑
+        # 查找 mt7603e (可能有后缀)
+        SRC_7603=$(find /tmp/kvr -type d -name "mt7603e*" -print -quit)
         if [ -n "$SRC_7603" ]; then
-            echo "Found mt7603e at $SRC_7603, replacing..."
+            echo "✅ Found mt7603e at: $SRC_7603"
             rm -rf $DRIVER_DIR/mt7603e
-            cp -r "$SRC_7603" $DRIVER_DIR/
+            # 注意：原脚本是将找到的文件夹重命名复制为目标文件夹名
+            cp -r "$SRC_7603" $DRIVER_DIR/mt7603e
         else
-            echo "::warning:: mt7603e driver not found in KVR repo!"
+            echo "::error:: ❌ mt7603e driver not found in KVR repo!"
+            ls -R /tmp/kvr # 调试输出
+            exit 1 # 找不到驱动直接报错停止，避免后续瞎编译
         fi
 
-        # 查找 mt7612e
-        SRC_7612=$(find /tmp/kvr -type d -name "mt7612e" | head -n 1)
+        # 查找 mt7612e (可能有后缀)
+        SRC_7612=$(find /tmp/kvr -type d -name "mt7612e*" -print -quit)
         if [ -n "$SRC_7612" ]; then
-            echo "Found mt7612e at $SRC_7612, replacing..."
+            echo "✅ Found mt7612e at: $SRC_7612"
             rm -rf $DRIVER_DIR/mt7612e
-            cp -r "$SRC_7612" $DRIVER_DIR/
+            cp -r "$SRC_7612" $DRIVER_DIR/mt7612e
         else
-            echo "::warning:: mt7612e driver not found in KVR repo!"
+             echo "::error:: ❌ mt7612e driver not found in KVR repo!"
+             exit 1
         fi
         
-        # 清理临时文件
+        # 清理
         rm -rf /tmp/kvr
 
         # 2. 修复 build 工具兼容性
@@ -138,7 +141,6 @@ jobs:
         
         # 3. 修复 Dropbear 编译
         sed -i 's|./configure|export CFLAGS="-I/usr/include/tirpc"; export LIBS="-ltirpc"; ./configure|g' trunk/user/dropbear/Makefile
-
         
     - name: (Kernel 3.4) Configure Target
       if: env.KERNEL_VER == '3.4'
@@ -195,13 +197,19 @@ jobs:
     - name: Compile Firmware
       run: |
         cd ${{ env.WORK_DIR }}/trunk
-        
-        # 清理旧数据
         ./clear_tree || true
         
         echo "Building for ${{ env.TARGET_PROFILE }}..."
-        # 使用 fakeroot 进行构建
+        
+        # 使用 set -e 确保编译出错立即停止
+        set -e
         fakeroot ./build_firmware ${{ env.TARGET_PROFILE }}
+        
+        # 二次确认产物是否存在
+        if [ ! -f images/*.trx ]; then
+            echo "::error:: Build finished but no firmware found in trunk/images!"
+            exit 1
+        fi
 
     # --- 整理产物 ---
     - name: Organize Artifacts
