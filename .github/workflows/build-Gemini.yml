@@ -1,4 +1,4 @@
-name: Build Newifi3 D2 (Gemini Final Restore)
+name: Build Newifi3 D2 (Gemini 3 Pro)
 
 on:
   workflow_dispatch:
@@ -17,13 +17,12 @@ permissions:
 
 env:
   TZ: Asia/Shanghai
-  FIRMWARE_PATH: ${{ github.workspace }}/output_firmware
+  # 删除 FIRMWARE_PATH 环境变量，改用局部相对路径
 
 jobs:
   build:
     runs-on: ubuntu-latest
     
-    # 使用你之前构建成功的 Docker 镜像
     container:
       image: ghcr.io/biaogo94/cleanpadavan-newifi3/padavan-builder:latest
       options: --user root
@@ -72,31 +71,20 @@ jobs:
         mkdir -p /opt/rt-n56u
         sudo ln -sf ${{ env.WORK_DIR }}/toolchain-mipsel /opt/rt-n56u/toolchain-mipsel
 
-    # =======================================================
-    # 核心修正：完全回归原始脚本逻辑
-    # =======================================================
     - name: (Kernel 3.4) Apply KVR & Fixes
       if: env.KERNEL_VER == '3.4'
       run: |
         cd ${{ env.WORK_DIR }}
         
-        # --- 原始 KVR 注入逻辑 (完全复刻) ---
-        echo ">>> Applying KVR patches (Original Logic)..."
-        
+        echo ">>> Applying KVR patches..."
         KVR_TEMP="/tmp/padavan_kvr"
         rm -rf $KVR_TEMP
         git clone --depth=1 https://github.com/vb1980/Padavan-KVR.git $KVR_TEMP
         
-        # 注意：DEST_DRIVER_DIR 这里要适配当前的 WORK_DIR 路径
         DEST_DRIVER_DIR="${{ env.WORK_DIR }}/trunk/proprietary_driver/rt_wifi"
         
-        # 原汁原味的查找命令
         SRC_MT7603=$(find $KVR_TEMP -type d -name "mt7603e*" -print -quit)
         SRC_MT7612=$(find $KVR_TEMP -type d -name "mt7612e*" -print -quit)
-        
-        # 调试输出一下，让人安心
-        echo "Found 7603 at: $SRC_MT7603"
-        echo "Found 7612 at: $SRC_MT7612"
         
         if [ -n "$SRC_MT7603" ]; then 
             echo "Replacing mt7603e..."
@@ -112,7 +100,6 @@ jobs:
         
         rm -rf $KVR_TEMP
         
-        # --- 其他必要的构建修复 ---
         sed -i 's/$(MAKE) -C $(XZ_DIR)/sed -i "s\/ po \/ \/g" $(XZ_DIR)\/Makefile; $(MAKE) -C $(XZ_DIR)/g' trunk/tools/mksquashfs_xz/Makefile
         sed -i 's|./configure|export CFLAGS="-I/usr/include/tirpc"; export LIBS="-ltirpc"; ./configure|g' trunk/user/dropbear/Makefile
 
@@ -126,11 +113,8 @@ jobs:
             cp -f configs/templates/newifi3.config .config
         fi
 
-        # 强制设置驱动版本 (配合上面的文件夹替换)
         sed -i 's/CONFIG_FIRMWARE_WIFI2_DRIVER=.*$/CONFIG_FIRMWARE_WIFI2_DRIVER=5.0/g' .config
         sed -i 's/CONFIG_FIRMWARE_WIFI5_DRIVER=.*$/CONFIG_FIRMWARE_WIFI5_DRIVER=3.0/g' .config
-        
-        # 开启 KVR 宏
         sed -i '/CONFIG_FIRMWARE_INCLUDE_WIFI_KVR/d' .config
         echo "CONFIG_FIRMWARE_INCLUDE_WIFI_KVR=y" >> .config
 
@@ -153,8 +137,6 @@ jobs:
              sed -i 's/CONFIG_FIRMWARE_INCLUDE_ARIA=y/CONFIG_FIRMWARE_INCLUDE_ARIA=n/g' .config
              sed -i 's/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION=y/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION=n/g' .config
              sed -i 's/CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=n/CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=y/g' .config
-             
-             # 禁用 RTL-SDR 以防 cmake 报错
              sed -i 's/CONFIG_FIRMWARE_INCLUDE_RTL_SDR=y/CONFIG_FIRMWARE_INCLUDE_RTL_SDR=n/g' .config
         fi
 
@@ -166,6 +148,7 @@ jobs:
         echo "Building..."
         fakeroot ./build_firmware ${{ env.TARGET_PROFILE }}
         
+        # 检查是否真的生成了 TRX 文件
         if [ ! -f images/*.trx ]; then
             echo "::error:: Compilation failed! No .trx file generated."
             exit 1
@@ -173,8 +156,14 @@ jobs:
 
     - name: Organize Artifacts
       run: |
-        mkdir -p ${{ env.FIRMWARE_PATH }}
-        find ${{ env.WORK_DIR }}/trunk/images -name "*.trx" -exec cp {} ${{ env.FIRMWARE_PATH }}/ \;
+        # 创建 output_firmware 目录（相对路径）
+        mkdir -p output_firmware
+        
+        # 将生成的固件复制过去
+        find ${{ env.WORK_DIR }}/trunk/images -name "*.trx" -exec cp {} output_firmware/ \;
+        
+        # 打印一下看看
+        ls -lh output_firmware/
 
     - name: Upload Firmware to Release
       uses: softprops/action-gh-release@v1
@@ -185,6 +174,7 @@ jobs:
         body: |
            Newifi3 D2 Padavan Auto Build
            Kernel: ${{ env.KERNEL_VER }}
-        files: ${{ env.FIRMWARE_PATH }}/*.trx
+        # 使用相对路径匹配，这在容器环境中是最稳的
+        files: output_firmware/*.trx
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
