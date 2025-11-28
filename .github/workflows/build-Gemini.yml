@@ -85,34 +85,24 @@ jobs:
         
         # 1. 注入 KVR 补丁 (vb1980)
         echo "Applying KVR patches..."
-        git clone --depth=1 https://github.com/vb1980/Padavan-KVR.git /tmp/kvr
-        
-        DRIVER_DIR="trunk/proprietary_driver/rt_wifi"
-        
-        # [核心修复] 使用 -name "xxx*" 匹配带后缀的目录，并使用 -print -quit 只取第一个
-        # 查找 mt7603e
-        SRC_7603=$(find /tmp/kvr -type d -name "mt7603e*" -print -quit)
-        if [ -n "$SRC_7603" ]; then
-            echo "✅ Found mt7603e at: $SRC_7603"
-            rm -rf $DRIVER_DIR/mt7603e
-            cp -r "$SRC_7603" $DRIVER_DIR/mt7603e
-        else
-            echo "::error:: ❌ mt7603e driver not found in KVR repo!"
-            exit 1
-        fi
 
-        # 查找 mt7612e
-        SRC_7612=$(find /tmp/kvr -type d -name "mt7612e*" -print -quit)
-        if [ -n "$SRC_7612" ]; then
-            echo "✅ Found mt7612e at: $SRC_7612"
-            rm -rf $DRIVER_DIR/mt7612e
-            cp -r "$SRC_7612" $DRIVER_DIR/mt7612e
-        else
-             echo "::error:: ❌ mt7612e driver not found in KVR repo!"
-             exit 1
-        fi
+        KVR_TEMP="/tmp/padavan_kvr"
+
+        git clone --depth=1 https://github.com/vb1980/Padavan-KVR.git $KVR_TEMP
+
+        DEST_DRIVER_DIR="$WORK_DIR/trunk/proprietary_driver/rt_wifi"
+
+        SRC_MT7603=$(find $KVR_TEMP -type d -name "mt7603e*" -print -quit)
+
+        SRC_MT7612=$(find $KVR_TEMP -type d -name "mt7612e*" -print -quit)
+
         
-        rm -rf /tmp/kvr
+
+        if [ -n "$SRC_MT7603" ]; then rm -rf $DEST_DRIVER_DIR/mt7603e; cp -r "$SRC_MT7603" $DEST_DRIVER_DIR/mt7603e; fi
+
+        if [ -n "$SRC_MT7612" ]; then rm -rf $DEST_DRIVER_DIR/mt7612e; cp -r "$SRC_MT7612" $DEST_DRIVER_DIR/mt7612e; fi
+
+        rm -rf $KVR_TEMP 
 
         # 2. 修复 build 工具兼容性
         sed -i 's/$(MAKE) -C $(XZ_DIR)/sed -i "s\/ po \/ \/g" $(XZ_DIR)\/Makefile; $(MAKE) -C $(XZ_DIR)/g' trunk/tools/mksquashfs_xz/Makefile
