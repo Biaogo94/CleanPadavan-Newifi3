@@ -15,7 +15,6 @@ on:
 permissions:
   contents: write
 
-# 定义全局环境变量，方便统一管理
 env:
   TZ: Asia/Shanghai
   FIRMWARE_PATH: ${{ github.workspace }}/output_firmware
@@ -24,11 +23,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
     
-    # [核心优化] 使用我们构建的专用 Docker 镜像
-    # 包含了所有依赖 (gcc, python2/3, ncurses5, toolchain-deps 等)
+    # ⚠️ 请确认下方 image 地址与你实际构建的地址一致
+    # 通常格式为: ghcr.io/用户名(小写)/仓库名(小写)/padavan-builder:latest
     container:
       image: ghcr.io/biaogo94/cleanpadavan-newifi3/padavan-builder:latest
-      options: --user root  # 强制 Root 权限以避免权限问题
+      options: --user root
 
     steps:
     - name: Checkout CI Scripts
@@ -37,7 +36,7 @@ jobs:
     - name: Initialize Environment Variables
       id: init
       run: |
-        # 修正：确保每一行变量赋值都写入 $GITHUB_ENV
+        # 判断内核版本并设置变量
         if [[ "${{ github.event.inputs.target_version }}" == *"4.4"* ]]; then
           echo "KERNEL_VER=4.4" >> $GITHUB_ENV
           echo "REPO_URL=https://github.com/MeIsReallyBa/padavan-4.4.git" >> $GITHUB_ENV
@@ -53,36 +52,19 @@ jobs:
         echo "BUILD_DATE=$(date +%Y%m%d)" >> $GITHUB_ENV
         echo "WORK_DIR=${{ github.workspace }}/padavan" >> $GITHUB_ENV
 
-    # 建议增加这一步用于调试，防止未来出现类似空变量问题
-    - name: Check Environment Variables
-      run: |
-        echo "Checking variables before cloning..."
-        echo "KERNEL_VER: ${{ env.KERNEL_VER }}"
-        echo "REPO_URL: ${{ env.REPO_URL }}"
-        echo "REPO_BRANCH: ${{ env.REPO_BRANCH }}"
-        echo "WORK_DIR: ${{ env.WORK_DIR }}"
-        
-        if [ -z "${{ env.REPO_URL }}" ]; then
-          echo "Error: REPO_URL is empty!"
-          exit 1
-        fi
-
     - name: Clone Source Code
       run: |
-        echo "Cloning ${{ env.KERNEL_VER }} source..."
+        echo "Cloning ${{ env.KERNEL_VER }} source from ${{ env.REPO_URL }} ..."
         git clone --depth=1 --branch ${{ env.REPO_BRANCH }} ${{ env.REPO_URL }} ${{ env.WORK_DIR }}
 
-    # [核心优化] 缓存工具链，避免每次重复下载
     - name: Cache Toolchain
       id: cache-toolchain
       uses: actions/cache@v4
       with:
         path: ${{ env.WORK_DIR }}/toolchain-mipsel
-        # 缓存键值基于内核版本和工具链下载脚本的哈希
         key: toolchain-${{ env.KERNEL_VER }}-${{ hashFiles(format('{0}/toolchain-mipsel/dl_toolchain.sh', env.WORK_DIR)) }}
 
     - name: Prepare Toolchain
-      # 仅当缓存未命中时执行
       if: steps.cache-toolchain.outputs.cache-hit != 'true'
       run: |
         cd ${{ env.WORK_DIR }}/toolchain-mipsel
@@ -90,11 +72,10 @@ jobs:
 
     - name: Link Toolchain
       run: |
-        # 无论是否缓存，都需要建立软链接到 /opt
         mkdir -p /opt/rt-n56u
         sudo ln -sf ${{ env.WORK_DIR }}/toolchain-mipsel /opt/rt-n56u/toolchain-mipsel
-        # 验证工具链
-        /opt/rt-n56u/toolchain-mipsel/toolchain-3.4.x/bin/mipsel-linux-uclibc-gcc --version || echo "Toolchain check passed (or version output hidden)"
+        # 简单验证
+        /opt/rt-n56u/toolchain-mipsel/toolchain-3.4.x/bin/mipsel-linux-uclibc-gcc --version || echo "Toolchain verification skipped"
 
     # --- 3.4 内核专属逻辑 (KVR & Patch) ---
     - name: (Kernel 3.4) Apply KVR & Fixes
@@ -108,21 +89,19 @@ jobs:
         
         DRIVER_DIR="trunk/proprietary_driver/rt_wifi"
         
-        # [关键修正] 恢复通配符 *，并对应原脚本逻辑
-        # 查找 mt7603e (可能有后缀)
+        # [核心修复] 使用 -name "xxx*" 匹配带后缀的目录，并使用 -print -quit 只取第一个
+        # 查找 mt7603e
         SRC_7603=$(find /tmp/kvr -type d -name "mt7603e*" -print -quit)
         if [ -n "$SRC_7603" ]; then
             echo "✅ Found mt7603e at: $SRC_7603"
             rm -rf $DRIVER_DIR/mt7603e
-            # 注意：原脚本是将找到的文件夹重命名复制为目标文件夹名
             cp -r "$SRC_7603" $DRIVER_DIR/mt7603e
         else
             echo "::error:: ❌ mt7603e driver not found in KVR repo!"
-            ls -R /tmp/kvr # 调试输出
-            exit 1 # 找不到驱动直接报错停止，避免后续瞎编译
+            exit 1
         fi
 
-        # 查找 mt7612e (可能有后缀)
+        # 查找 mt7612e
         SRC_7612=$(find /tmp/kvr -type d -name "mt7612e*" -print -quit)
         if [ -n "$SRC_7612" ]; then
             echo "✅ Found mt7612e at: $SRC_7612"
@@ -133,7 +112,6 @@ jobs:
              exit 1
         fi
         
-        # 清理
         rm -rf /tmp/kvr
 
         # 2. 修复 build 工具兼容性
@@ -141,23 +119,22 @@ jobs:
         
         # 3. 修复 Dropbear 编译
         sed -i 's|./configure|export CFLAGS="-I/usr/include/tirpc"; export LIBS="-ltirpc"; ./configure|g' trunk/user/dropbear/Makefile
-        
+
     - name: (Kernel 3.4) Configure Target
       if: env.KERNEL_VER == '3.4'
       run: |
         cd ${{ env.WORK_DIR }}/trunk
-        # 复制模板配置
         if [ -f "configs/templates/NEWIFI3.config" ]; then
             cp -f configs/templates/NEWIFI3.config .config
         else
             cp -f configs/templates/newifi3.config .config
         fi
 
-        # 修改 .config 配置
+        # 强制设置驱动版本
         sed -i 's/CONFIG_FIRMWARE_WIFI2_DRIVER=.*$/CONFIG_FIRMWARE_WIFI2_DRIVER=5.0/g' .config
         sed -i 's/CONFIG_FIRMWARE_WIFI5_DRIVER=.*$/CONFIG_FIRMWARE_WIFI5_DRIVER=3.0/g' .config
         
-        # 确保开启 KVR
+        # 确保 KVR 开启
         sed -i '/CONFIG_FIRMWARE_INCLUDE_WIFI_KVR/d' .config
         echo "CONFIG_FIRMWARE_INCLUDE_WIFI_KVR=y" >> .config
 
@@ -168,29 +145,29 @@ jobs:
         cd ${{ env.WORK_DIR }}/trunk
         CONFIG_FILE="configs/boards/${{ env.TARGET_PROFILE }}/board.mk"
         
-        # 4.4 版本通常直接修改 board.mk
         if [ -f "$CONFIG_FILE" ]; then
-            # 强制开启 FlowOffload
+            # 开启硬件加速
             sed -i 's/CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=n/CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=y/g' $CONFIG_FILE
-            # 关闭不需要的插件
+            # 关闭常用插件
             for APP in ARIA TRANSMISSION OPENVPN SMARTDNS TROJAN; do
                 sed -i "s/CONFIG_FIRMWARE_INCLUDE_${APP}=y/CONFIG_FIRMWARE_INCLUDE_${APP}=n/g" $CONFIG_FILE
             done
         else
-            echo "Error: Config file $CONFIG_FILE not found!"
+            echo "::error:: Config file $CONFIG_FILE not found!"
             exit 1
         fi
 
-    # --- 通用清理逻辑 (减小体积) ---
-    - name: Common Customization (Clean up)
+    # --- 通用清理与配置 ---
+    - name: Common Customization
       run: |
         cd ${{ env.WORK_DIR }}/trunk
-        # 如果是 3.4，直接修改 .config，如果是 4.4 且已经生成了 .config 则修改，否则依赖上一步
         if [ -f .config ]; then
              sed -i 's/CONFIG_FIRMWARE_INCLUDE_ARIA=y/CONFIG_FIRMWARE_INCLUDE_ARIA=n/g' .config
              sed -i 's/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION=y/CONFIG_FIRMWARE_INCLUDE_TRANSMISSION=n/g' .config
-             # 确保 FlowOffload 开启
              sed -i 's/CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=n/CONFIG_FIRMWARE_ENABLE_FLOWOFFLOAD=y/g' .config
+             
+             # [重要] 禁用 RTL-SDR 以避免 cmake 依赖报错
+             sed -i 's/CONFIG_FIRMWARE_INCLUDE_RTL_SDR=y/CONFIG_FIRMWARE_INCLUDE_RTL_SDR=n/g' .config
         fi
 
     # --- 核心编译 ---
@@ -201,30 +178,23 @@ jobs:
         
         echo "Building for ${{ env.TARGET_PROFILE }}..."
         
-        # 使用 set -e 确保编译出错立即停止
-        set -e
+        # 1. 执行编译
         fakeroot ./build_firmware ${{ env.TARGET_PROFILE }}
         
-        # 二次确认产物是否存在
+        # 2. 立即检查产物
         if [ ! -f images/*.trx ]; then
-            echo "::error:: Build finished but no firmware found in trunk/images!"
+            echo "::error:: ❌ Compilation failed! No .trx file generated."
             exit 1
+        else
+            echo "✅ Compilation successful. Firmware found."
         fi
 
     # --- 整理产物 ---
     - name: Organize Artifacts
       run: |
         mkdir -p ${{ env.FIRMWARE_PATH }}
-        # 查找 trx 文件并复制，处理可能的大小写文件名问题
         find ${{ env.WORK_DIR }}/trunk/images -name "*.trx" -exec cp {} ${{ env.FIRMWARE_PATH }}/ \;
-        
-        echo "Checking artifacts..."
         ls -lh ${{ env.FIRMWARE_PATH }}
-        
-        if [ -z "$(ls -A ${{ env.FIRMWARE_PATH }})" ]; then
-           echo "::error::Build failed, no firmware found!"
-           exit 1
-        fi
 
     # --- 上传 Release ---
     - name: Upload Firmware to Release
@@ -234,7 +204,7 @@ jobs:
         tag_name: v${{ env.BUILD_DATE }}-${{ env.KERNEL_VER }}
         name: Newifi3 D2 Padavan ${{ env.KERNEL_VER }} (${{ env.BUILD_DATE }})
         body: |
-          ### 🚀 Newifi3 D2 自动构建
+          ### 🚀 Newifi3 D2 自动构建 (修复版)
           
           | 信息 | 说明 |
           | :--- | :--- |
@@ -243,9 +213,9 @@ jobs:
           | **构建日期** | ${{ env.BUILD_DATE }} |
           
           ### ✨ 特性
-          * ⚡ **Flow Offload**: 已开启 (硬件加速)
-          * 📶 **WIFI KVR**: ${{ env.KERNEL_VER == '3.4' && '✅ 支持 (vb1980 patch)' || '⚠️ 原生 (未打 patch)' }}
-          * 🧹 **精简版**: 已移除 Aria2/Transmission 以提升稳定性
+          * ⚡ **Flow Offload**: 已开启
+          * 📶 **WIFI KVR**: ${{ env.KERNEL_VER == '3.4' && '✅ 支持 (vb1980 patch)' || '⚠️ 原生' }}
+          * 🧹 **精简版**: 移除 Aria2/Transmission/RTL-SDR
           
           ### 🛠 使用方法
           在 Breed Web 恢复控制台中上传 `.trx` 文件进行更新。
